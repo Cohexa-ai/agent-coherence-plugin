@@ -83,6 +83,16 @@ The coordinator creates `.coherence/` at your repo root automatically. Inside it
 | Frequent acquire/release events in `agent-coherence-status` | Per-turn Stop-hook release of uncommitted grants. Normal end-of-turn behavior, not a bug. | No action. Telemetry counter `intra_task_acquire_release_count` will quantify this in v0.1.1. |
 | `state.db` corrupted | Power loss during WAL checkpoint, or SQLite version mismatch | `rm .coherence/state.db` — next coordinator spawn starts fresh |
 | Coordinator process won't die | Stale `server.pid` after crash | `rm .coherence/server.pid` to clear the lock, next hook fires re-spawn |
+| `hook.secret` compromised | Same-user attack or accidental leak | Stop all sessions, `rm -rf .coherence/`, restart any Claude Code session. v0.2 will support hot rotation without restart. |
+
+## v0.1 known limitations
+
+| Issue | Impact | When it matters |
+|---|---|---|
+| [Watchdog races](docs/known-issues/2026-05-17-watchdog-races.md) (A6, A7) | Stale reads can be silently suppressed under sustained concurrent load | Shared CI runners, stress tests, >10 parallel sessions. Not normal single-developer use. v0.1.1 design pass will close. |
+| Native Windows not supported | `fcntl` lock primitive is POSIX-only | Use WSL2 on Windows. v0.2 ships an `os.O_EXCL` fallback. |
+| Strict mode (`permissionDecision: "deny"`) deferred to v0.2 | v0.1 warns but never blocks | Hard guardrails for "agent MUST re-read before edit" not available yet. Empirical retry-loop hazard on v2.1.131 forced this deferral. |
+| `claude agents` background sessions untested | Hooks may or may not fire from background subprocess sessions | Smoke test deferred to alpha installer feedback. If you use `claude agents` and the coordinator doesn't see those sessions, [file an issue](https://github.com/hipvlady/agent-coherence-plugin/issues). |
 
 ## License
 
