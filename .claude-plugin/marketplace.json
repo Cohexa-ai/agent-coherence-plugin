@@ -1,0 +1,33 @@
+{
+  "name": "agent-coherence",
+  "owner": {
+    "name": "Vlad Parakhin",
+    "email": "vlad@fwdinc.net",
+    "url": "https://agent-coherence.dev/code"
+  },
+  "description": "Private alpha marketplace for the agent-coherence plugin. Surfaces stale-spec collisions across parallel Claude Code sessions in the same workspace.",
+  "plugins": [
+    {
+      "name": "agent-coherence",
+      "source": "./",
+      "description": "Stale-spec collision detector for parallel Claude Code sessions. Warns when one session is about to act on an artifact another session has updated. Requires `pip install agent-coherence` for the coordinator backend.",
+      "version": "0.1.0-alpha.1",
+      "author": {
+        "name": "Vlad Parakhin",
+        "email": "vlad@fwdinc.net",
+        "url": "https://agent-coherence.dev/code"
+      },
+      "homepage": "https://github.com/hipvlady/agent-coherence-plugin",
+      "repository": "https://github.com/hipvlady/agent-coherence-plugin",
+      "license": "Apache-2.0",
+      "keywords": [
+        "coherence",
+        "multi-agent",
+        "parallel-sessions",
+        "agent-view",
+        "worktree",
+        "stale-read"
+      ]
+    }
+  ]
+}

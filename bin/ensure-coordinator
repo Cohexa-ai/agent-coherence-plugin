@@ -1,28 +1,20 @@
 #!/usr/bin/env bash
-# agent-coherence plugin: SessionStart hook
-# Ensures the local coordinator is running for this workspace.
+# agent-coherence plugin: SessionStart hook shim.
 #
-# Behavior:
-#   - If COHERENCE_PORT is already set (inherited from $CLAUDE_ENV_FILE), validate it's a
-#     decimal integer and exit 0.
-#   - Otherwise, invoke the `agent-coherence-coordinator` console script from the
-#     pip-installed `agent-coherence` library, which handles fcntl-locked lazy spawn,
-#     port-file write fence, idle-shutdown, and SQLite-WAL rehydration.
+# Ensures the local coordinator is running for this workspace. The Python
+# coordinator handles fcntl-locked lazy spawn + race-safety + idle-shutdown +
+# SQLite-WAL rehydration. This shim is intentionally thin.
 #
-# Errors degrade gracefully: a missing library → no coordinator → hook handlers proceed
-# silently per v0.1 warn-mode best-effort stance.
+# On v2.1.131, plugin hooks are *command-type* (per Phase E.0 probe 2A —
+# CC's hooks.json schema validator rejects URLs containing env-var templates
+# at load time, so HTTP-type with ${COHERENCE_PORT} is structurally infeasible).
+# The hook-client reads .coherence/server.pid directly, so this shim does NOT
+# need to propagate COHERENCE_PORT via $CLAUDE_ENV_FILE.
+#
+# Errors degrade gracefully: a missing library → no coordinator → hook
+# handlers no-op silently per v0.1 warn-mode best-effort stance.
 
 set -uo pipefail
-
-# Validate inherited COHERENCE_PORT if set (defense against env-var injection)
-if [ -n "${COHERENCE_PORT:-}" ]; then
-  if ! [[ "$COHERENCE_PORT" =~ ^[0-9]+$ ]]; then
-    echo "agent-coherence: rejecting non-numeric COHERENCE_PORT=$COHERENCE_PORT" >&2
-    exit 1
-  fi
-  # Already initialized in this session
-  exit 0
-fi
 
 # Locate the coordinator console script (installed by `pip install agent-coherence`)
 if ! command -v agent-coherence-coordinator >/dev/null 2>&1; then
@@ -30,31 +22,7 @@ if ! command -v agent-coherence-coordinator >/dev/null 2>&1; then
   exit 0
 fi
 
-# Spawn or attach. The Python script handles fcntl-locked lazy spawn + race-safety;
-# it prints `port=<N>` to stdout but does NOT write $CLAUDE_ENV_FILE — that's this
-# shim's job (Claude Code's env-propagation mechanism is shell-driven, not Python).
-port_line=$(agent-coherence-coordinator)
-status=$?
-if [ "$status" -ne 0 ]; then
-  exit "$status"
-fi
-
-# Parse and validate the port from `port=<N>` output.
-port="${port_line#port=}"
-if ! [[ "$port" =~ ^[0-9]+$ ]]; then
-  echo "agent-coherence: coordinator returned unexpected output: $port_line" >&2
-  exit 1
-fi
-
-# Write COHERENCE_PORT to the env file so subsequent PreToolUse/PostToolUse/Stop
-# hooks see it (their hooks.json URLs use ${COHERENCE_PORT} expansion). The env
-# file is the documented Claude Code mechanism for cross-hook env propagation.
-# If $CLAUDE_ENV_FILE is unset (older claude versions, or non-plugin invocation),
-# the chain is broken and the user falls back to hooks-command.json — see
-# docs/probes/2026-05-17-phase-e0-probe-procedure.md.
-if [ -n "${CLAUDE_ENV_FILE:-}" ]; then
-  echo "export COHERENCE_PORT=$port" >> "$CLAUDE_ENV_FILE"
-fi
-
-# Also print to stdout for debug / standalone-shim verification.
-echo "$port_line"
+# Spawn or attach. The Python script writes <pid>\n<port>\n to .coherence/server.pid;
+# the hook-client subsequently reads it to address the coordinator. We don't need
+# to capture or propagate the port through env vars.
+exec agent-coherence-coordinator --quiet

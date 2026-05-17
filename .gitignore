@@ -31,3 +31,7 @@ venv/
 # Local-only docs (per agent-coherence convention)
 docs/local/
 *.local.md
+
+# Obsidian artifacts (vault metadata, not project files)
+.obsidian/
+**/.obsidian/

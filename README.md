@@ -8,7 +8,13 @@ Surfaces stale-spec collisions across parallel Claude Code sessions sharing a wo
 
 Two parallel sessions can read the same `plan.md` at v1, work independently in their per-session worktrees, and produce PRs that reflect incompatible interpretations because the planner already published v2. Worktrees prevent direct file collisions but not stale-spec collisions.
 
-This plugin watches tracked artifacts (CLAUDE.md, AGENTS.md, `docs/specs/`, `docs/plans/`, `docs/brainstorms/`, `plan.md`/`task.md`/`spec.md`) across Agent View, `claude agents`, and multi-terminal sessions. When one session is about to act on an artifact another session has updated, the plugin injects a warning into the agent's own context via `additionalContext`. The agent reads the warning alongside the file and decides what to do — typically re-read before acting.
+This plugin watches tracked artifacts (CLAUDE.md, AGENTS.md, `docs/specs/`, `docs/plans/`, `docs/brainstorms/`, `plan.md`/`task.md`/`spec.md`) across Agent View, multi-terminal sessions, and Task-tool subagents. When one session is about to act on an artifact another session has updated, the plugin injects a warning into the agent's own context via `additionalContext`. The agent reads the warning alongside the file and decides what to do — typically re-read before acting.
+
+**Coverage scope (verified against `claude` v2.1.131 on 2026-05-17 — see [Phase E.0 probe results](docs/probes/2026-05-17-phase-e0-probe-procedure.md))**:
+- Agent View ✓
+- Multi-terminal (multiple `claude` processes in the same workspace) ✓
+- Task-tool subagents — subagent hooks fire under the parent's session_id, so warnings surface to the parent's context ✓
+- `claude agents` subcommand — on v2.1.131 the subcommand is a management UI, not a session spawner; not in v0.1 scope
 
 **v0.1 ships warn-only.** Strict mode (`permissionDecision: "deny"`) is deferred to v0.2 — empirical testing showed it needs per-(session, path) retry counters and varied-reason templating to avoid model retry loops.
 
@@ -16,15 +22,22 @@ This plugin watches tracked artifacts (CLAUDE.md, AGENTS.md, `docs/specs/`, `doc
 
 ## Install (v0.1 private alpha — invite-only)
 
-v0.1 is an **alpha**. ~10 hand-picked installers from discovery calls and ecosystem engagements. Two steps for v0.1; collapses to one-click in v0.1.1 (Node rewrite).
+v0.1 is an **alpha**. ~10 hand-picked installers from discovery calls and ecosystem engagements. Two-step install for v0.1 (Python coordinator + Claude Code plugin); collapses to one-click in v0.1.1 (Node MESI-subset coordinator).
 
 ```bash
-# Step 1 — install the Python library that provides the coordinator console script
+# Step 1 — install the Python library that provides the coordinator + hook client
 pip install agent-coherence
 
-# Step 2 — install this Claude Code plugin
-claude plugin install git@github.com:hipvlady/agent-coherence-plugin.git
+# Verify the required console scripts landed on PATH
+command -v agent-coherence-coordinator
+command -v agent-coherence-hook-client
+
+# Step 2 — register this repo as a Claude Code marketplace, then install the plugin
+claude plugin marketplace add hipvlady/agent-coherence-plugin
+claude plugin install agent-coherence@agent-coherence
 ```
+
+After install, restart any running `claude` sessions in your workspace so the new SessionStart hook fires.
 
 ### Scope (v0.1)
 
@@ -44,7 +57,7 @@ claude --include-hook-events --output-format stream-json "your prompt"
 
 ## How it works (one paragraph)
 
-A lazy-spawned local HTTP coordinator at the parent repo root (`<repo>/.coherence/`) wraps a SQLite-WAL state store implementing the MESI cache-coherence protocol. PreToolUse hooks POST to the coordinator on every `Read`, `Edit`, `Write`; PostToolUse hooks commit writes and trigger peer invalidations; the Stop hook releases any uncommitted EXCLUSIVE grants at end-of-turn. All HTTP traffic is `127.0.0.1`-bound with shared-secret Bearer auth (`.coherence/hook.secret`, mode `0600`). Coordinator idle-shuts after 15 minutes; SQLite state rehydrates on next spawn. See the underlying library: [agent-coherence](https://github.com/hipvlady/agent-coherence).
+A lazy-spawned local HTTP coordinator at the parent repo root (`<repo>/.coherence/`) wraps a SQLite-WAL state store implementing the MESI cache-coherence protocol. Plugin hooks are **command-type** (not HTTP-type — Claude Code v2.1.131's hooks.json schema validator rejects URLs containing env-var templates at load time per [Phase E.0 probe 2A](docs/probes/2026-05-17-phase-e0-probe-procedure.md)); each hook invokes `agent-coherence-hook-client` which reads `.coherence/server.pid` for the port + `.coherence/hook.secret` for the bearer token, then POSTs the hook payload to the coordinator. PreToolUse fires for every `Read`, `Edit`, `Write`; PostToolUse commits writes and triggers peer invalidations; Stop releases any uncommitted EXCLUSIVE grants at end-of-turn. All HTTP traffic is `127.0.0.1`-bound. Coordinator idle-shuts after 15 minutes; SQLite state rehydrates on next spawn. See the underlying library: [agent-coherence](https://github.com/hipvlady/agent-coherence).
 
 ## Commands
 
@@ -63,7 +76,7 @@ The coordinator creates `.coherence/` at your repo root automatically. Inside it
 - `tracked.yaml` — your opt-in patterns (gitignore-style globs). Commit this if you want the tracked set to apply across team checkouts.
 - `ignored.yaml` — your opt-out patterns. Same.
 
-**Note**: hooks fire HTTP requests to `http://127.0.0.1:<port>/...`. If your organization enforces `allowedHttpHookUrls`, you may need to allowlist `http://127.0.0.1:*/*` in your Claude Code settings.
+**Note on `allowedHttpHookUrls`**: v0.1 hooks are *command-type* (the `agent-coherence-hook-client` subprocess makes the HTTP call internally), not Claude Code's HTTP-type hooks. The `allowedHttpHookUrls` Claude Code policy does NOT apply to this plugin — no allowlist changes are required to install.
 
 ## Release sequence
 
@@ -77,8 +90,8 @@ The coordinator creates `.coherence/` at your repo root automatically. Inside it
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| Agents still hit stale-spec collisions silently | `pip install agent-coherence` step missed | Confirm `which agent-coherence-coordinator` resolves on PATH |
-| Hook traffic blocked | `allowedHttpHookUrls` policy excludes localhost | Allowlist `http://127.0.0.1:*/*` in Claude Code settings |
+| Agents still hit stale-spec collisions silently | `pip install agent-coherence` step missed, or `agent-coherence-hook-client` not on PATH | Confirm `which agent-coherence-coordinator agent-coherence-hook-client` both resolve. If `pip install` succeeded but binaries aren't found, check that your shell's PATH includes the install prefix's `bin/` directory (e.g. `~/.local/bin` for user installs). |
+| Plugin load failure / silent no-op | Coordinator backend not installed | Check `claude --include-hook-events --output-format stream-json "echo test"` for `plugin_errors` in the init event. If "hook-load-failed" appears, the plugin's hooks.json references commands not on PATH. |
 | Stale-warning shown when worktrees just have different branches checked out | Filesystem-state semantics: divergent content on first observation surfaces as `hash_differs` (KTD-9) | Expected behavior. Add the path to `ignored.yaml` if the divergence is intentional. |
 | Frequent acquire/release events in `agent-coherence-status` | Per-turn Stop-hook release of uncommitted grants. Normal end-of-turn behavior, not a bug. | No action. Telemetry counter `intra_task_acquire_release_count` will quantify this in v0.1.1. |
 | `state.db` corrupted | Power loss during WAL checkpoint, or SQLite version mismatch | `rm .coherence/state.db` — next coordinator spawn starts fresh |
@@ -90,9 +103,11 @@ The coordinator creates `.coherence/` at your repo root automatically. Inside it
 | Issue | Impact | When it matters |
 |---|---|---|
 | [Watchdog races](docs/known-issues/2026-05-17-watchdog-races.md) (A6, A7) | Stale reads can be silently suppressed under sustained concurrent load | Shared CI runners, stress tests, >10 parallel sessions. Not normal single-developer use. v0.1.1 design pass will close. |
+| [Lifecycle hardening deferrals](docs/known-issues/2026-05-17-lifecycle-deferred-hardening.md) (L1-L5) | Edge cases around `rm -rf .coherence/`, in-flight handler truncation, 30-process thundering herd, idle-shutdown stop semantics | Operational rare cases (CI fleets, manual `.coherence/` cleanup mid-session). Default single-developer interactive use unaffected. |
 | Native Windows not supported | `fcntl` lock primitive is POSIX-only | Use WSL2 on Windows. v0.2 ships an `os.O_EXCL` fallback. |
 | Strict mode (`permissionDecision: "deny"`) deferred to v0.2 | v0.1 warns but never blocks | Hard guardrails for "agent MUST re-read before edit" not available yet. Empirical retry-loop hazard on v2.1.131 forced this deferral. |
-| `claude agents` background sessions untested | Hooks may or may not fire from background subprocess sessions | Smoke test deferred to alpha installer feedback. If you use `claude agents` and the coordinator doesn't see those sessions, [file an issue](https://github.com/hipvlady/agent-coherence-plugin/issues). |
+| HTTP-type hooks not viable on v2.1.131 ([Phase E.0 probe 2A](docs/probes/2026-05-17-phase-e0-probe-procedure.md)) | hooks.json URL templating fails strict-URL schema validation at load time | v0.1 ships command-type hooks via `agent-coherence-hook-client` — works on v2.1.131. If a future CC version supports URL templating, an HTTP-type variant can be added as a perf optimization. |
+| `claude agents` subcommand not in coverage scope | The v2.1.131 subcommand is a management UI, not a session spawner; no PreToolUse hooks to capture | Use Agent View, multi-terminal, or Task-tool subagents (all in scope). If a future CC version exposes a session spawner via `claude agents`, file an issue and we'll re-probe coverage. |
 
 ## License
 
