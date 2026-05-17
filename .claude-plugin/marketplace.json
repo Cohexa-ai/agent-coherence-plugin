@@ -2,7 +2,7 @@
   "name": "agent-coherence",
   "owner": {
     "name": "Vlad Parakhin",
-    "email": "vlad@fwdinc.net",
+    "email": "vlad@agent-coherence.dev",
     "url": "https://agent-coherence.dev/code"
   },
   "description": "Private alpha marketplace for the agent-coherence plugin. Surfaces stale-spec collisions across parallel Claude Code sessions in the same workspace.",
@@ -14,7 +14,7 @@
       "version": "0.1.0-alpha.1",
       "author": {
         "name": "Vlad Parakhin",
-        "email": "vlad@fwdinc.net",
+        "email": "vlad@agent-coherence.dev",
         "url": "https://agent-coherence.dev/code"
       },
       "homepage": "https://github.com/hipvlady/agent-coherence-plugin",

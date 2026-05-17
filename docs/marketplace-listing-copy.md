@@ -132,7 +132,7 @@ Apache-2.0
 | Version | 0.1.1 (NOT 0.1.0-alpha.1 — that's the direct-install version) |
 | Min Claude Code version | 2.1.131 |
 | Max Claude Code version | (open) |
-| Author | Vlad Parakhin <vlad@fwdinc.net> |
+| Author | Vlad Parakhin <vlad@agent-coherence.dev> |
 | Source URL | https://github.com/hipvlady/agent-coherence-plugin |
 | Marketplace URL | https://github.com/hipvlady/agent-coherence-plugin |
 | License | Apache-2.0 |
