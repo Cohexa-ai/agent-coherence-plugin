@@ -1,9 +1,11 @@
 # Marketplace listing copy (v0.1.1 submission prep)
 
 **Status**: pre-written copy for the v0.1.1 marketplace catalog submission.
-v0.1 ships as a direct git+marketplace install (per [release sequence
-in README](../README.md#release-sequence)); v0.1.1 ships the Node
-MESI-subset coordinator and submits this listing.
+v0.1 ships as a two-step install — `pip install "agent-coherence>=0.8.0a1"`
+from PyPI (the library publishes the coordinator + hook-client entry
+points as of 2026-05-18) plus `claude plugin marketplace add` for this
+repo (per [release sequence in README](../README.md#release-sequence)).
+v0.1.1 ships the Node MESI-subset coordinator and submits this listing.
 
 **Format**: this file is structured for the Claude Code marketplace's
 expected fields. Copy verbatim into the submission form / PR.
@@ -140,10 +142,17 @@ Apache-2.0
 
 ## Submission checklist
 
-- [ ] Library published to PyPI as `agent-coherence>=0.8.0a1` (drops
-      `pip install` from git+ to standard PyPI; install time → ~10s)
+- [x] Library published to PyPI as `agent-coherence>=0.8.0a1` (drops
+      `pip install` from git+ to standard PyPI; measured install time
+      ≈ 3s in fresh py3.13 venv, 2026-05-18 AS-phpmac walkthrough)
 - [ ] Demo asset recorded and committed under `docs/demos/`
-- [ ] N=40 launch gate run completed (per Unit 9) with score ≥70%
+- [x] N=40 launch gate run completed (per Unit 9) with score ≥70% —
+      2026-05-18, two consecutive runs against live `claude` v2.1.131:
+      Run #1 re-read=35 / ack=3 / ignored=0 / degenerate=2, score=100%,
+      degenerate_rate=5%, 14:36 wall. Run #2 re-read=33 / ack=7 /
+      ignored=0 / degenerate=0, score=100%, degenerate_rate=0%, 17:07
+      wall. Harness fix that made the gate reliably runnable:
+      [hipvlady/agent-coherence#27](https://github.com/hipvlady/agent-coherence/pull/27)
 - [ ] AS-phpmac walkthrough re-run on a fresh machine against PyPI
       install path
 - [ ] At least 3 alpha installers have completed onboarding without

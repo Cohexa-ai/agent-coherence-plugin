@@ -118,3 +118,4 @@ Take the 4 scenes as still screenshots and string them as a 4-panel
 PNG montage. The warning text in scene 3 is the load-bearing visual;
 everything else is context. A montage is acceptable for v0.1 alpha if
 recorded video lags marketplace submission for v0.1.1.
+
