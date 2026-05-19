@@ -12,12 +12,15 @@
 *.transcript.json
 /tmp-test/
 
-# Node toolchain (v0.1.1 Node MESI-subset coordinator will land here)
+# Node toolchain (v0.1.1 Node MESI-subset coordinator lives at plugin root per KTD-C)
+# package-lock.json IS committed for deterministic install at SessionStart hook time.
+# node_modules/ is NOT committed — installed lazily into ${CLAUDE_PLUGIN_DATA} per KTD-C.
 node_modules/
 *.log
 npm-debug.log*
 dist/
 build/
+*.tsbuildinfo
 
 # Python toolchain (for local dev / scripts only — coordinator is installed via pip from the library)
 __pycache__/
@@ -42,3 +45,4 @@ docs/local/
 # with the original local files retained for design-pass reference.
 docs/probes/
 docs/known-issues/
+
