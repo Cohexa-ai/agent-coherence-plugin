@@ -1,0 +1,83 @@
+#!/usr/bin/env bash
+# agent-coherence Node coordinator: SessionStart bootstrap + lazy launch.
+#
+# Implements the officially-documented Claude Code plugin pattern for native
+# Node dependencies per `code.claude.com/docs/en/plugins-reference` § ${CLAUDE_PLUGIN_DATA}:
+# install deps lazily into PLUGIN_DATA on first use; persist across plugin
+# updates; retry on next session if install fails.
+#
+# Why this script copies BOTH package.json AND dist/ to PLUGIN_DATA (vs the
+# documented snippet which only copies package.json + relies on NODE_PATH):
+# the coordinator uses ESM (`"type": "module"` in package.json), and Node's
+# ESM resolver does NOT honor NODE_PATH — it walks the import tree from the
+# importing file's directory. Putting dist/ under PLUGIN_DATA puts
+# coordinator.js in the same tree as node_modules, so `import "better-sqlite3"`
+# resolves cleanly.
+#
+# Unit 1 scope: bootstrap + simple PID-liveness check. Unit 5 lands fcntl
+# race-safe spawn, inode revalidation per KTD-H, idle shutdown.
+#
+# NOT YET wired into hooks/hooks.json (still Python-default). Unit 5/6 adds
+# a backend-aware top-level dispatcher that selects this script when
+# `coherence.coordinator_backend: node` is set.
+
+set -uo pipefail
+
+# CLAUDE_PLUGIN_ROOT and CLAUDE_PLUGIN_DATA are provided by Claude Code per
+# the plugin spec. Bail loudly if invoked outside that context — useful for
+# local development to catch missing-env mistakes early.
+: "${CLAUDE_PLUGIN_ROOT:?CLAUDE_PLUGIN_ROOT must be set by Claude Code; invoke via a SessionStart hook}"
+: "${CLAUDE_PLUGIN_DATA:?CLAUDE_PLUGIN_DATA must be set by Claude Code; invoke via a SessionStart hook}"
+
+mkdir -p "${CLAUDE_PLUGIN_DATA}"
+
+# Stage 1: lazy `npm install` if package.json differs (initial install or
+# package update). Matches the documented pattern verbatim, with the
+# fail-then-rm-marker recovery for next-session retry.
+if ! diff -q "${CLAUDE_PLUGIN_ROOT}/package.json" "${CLAUDE_PLUGIN_DATA}/package.json" >/dev/null 2>&1; then
+  echo "agent-coherence: installing Node deps into ${CLAUDE_PLUGIN_DATA}" >&2
+  cp "${CLAUDE_PLUGIN_ROOT}/package.json" "${CLAUDE_PLUGIN_DATA}/" || exit 1
+  if [ -f "${CLAUDE_PLUGIN_ROOT}/package-lock.json" ]; then
+    cp "${CLAUDE_PLUGIN_ROOT}/package-lock.json" "${CLAUDE_PLUGIN_DATA}/" || true
+  fi
+  if ! (cd "${CLAUDE_PLUGIN_DATA}" && npm install --no-audit --no-fund --no-progress 2>&1); then
+    rm -f "${CLAUDE_PLUGIN_DATA}/package.json"
+    echo "agent-coherence: npm install failed; coordinator will not start this session. Next session retries." >&2
+    exit 1
+  fi
+fi
+
+# Stage 2: mirror dist/ to PLUGIN_DATA so coordinator.js sits in the same
+# directory tree as node_modules (ESM resolution requirement). rsync only
+# copies changed files; the cp -r fallback covers systems without rsync.
+mkdir -p "${CLAUDE_PLUGIN_DATA}/dist"
+if command -v rsync >/dev/null 2>&1; then
+  rsync -a --delete "${CLAUDE_PLUGIN_ROOT}/dist/" "${CLAUDE_PLUGIN_DATA}/dist/"
+else
+  cp -r "${CLAUDE_PLUGIN_ROOT}/dist/." "${CLAUDE_PLUGIN_DATA}/dist/"
+fi
+
+# Stage 3: simple "is coordinator running" check. Per-workspace, NOT
+# per-plugin-user — the coordinator's .coherence/ state lives in the
+# workspace per KTD-C (cross-backend coexistence). Unit 5 replaces this
+# best-effort check with a proper fcntl flock per KTD-A.5 point 1.
+WORKSPACE="${AGENT_COHERENCE_WORKSPACE:-$PWD}"
+PIDFILE="${WORKSPACE}/.coherence/server.pid"
+
+if [ -f "$PIDFILE" ]; then
+  EXISTING_PID=$(head -1 "$PIDFILE" 2>/dev/null || echo "")
+  if [ -n "$EXISTING_PID" ] && kill -0 "$EXISTING_PID" 2>/dev/null; then
+    echo "agent-coherence: coordinator already running (pid=$EXISTING_PID)" >&2
+    exit 0
+  fi
+  echo "agent-coherence: stale pid file (pid='${EXISTING_PID}' not running); spawning fresh" >&2
+fi
+
+# Stage 4: spawn the coordinator. Detach from the SessionStart hook's
+# process group so the hook can exit cleanly while the coordinator keeps
+# running for subsequent PreToolUse / Stop hook calls.
+COORD_LOG="${CLAUDE_PLUGIN_DATA}/coordinator.log"
+nohup node "${CLAUDE_PLUGIN_DATA}/dist/coordinator.js" >>"$COORD_LOG" 2>&1 &
+SPAWNED_PID=$!
+disown 2>/dev/null || true
+echo "agent-coherence: spawned Node coordinator (pid=${SPAWNED_PID}, log=${COORD_LOG})" >&2
