@@ -19,6 +19,9 @@
  * atomicity guarantee documented in Python's _apply_v1_schema docstring.
  */
 import type { Database } from "better-sqlite3";
+import { V1_INITIAL } from "./migrations/v1_initial.js";
+import { V2_VALIDATE_PENDING_NOTICES } from "./migrations/v2_validate_pending_notices.js";
+import { V3_WATCHDOG_DEADLINE } from "./migrations/v3_watchdog_deadline.js";
 
 export interface Migration {
   /** Monotonically increasing positive integer. */
@@ -36,9 +39,22 @@ export interface Migration {
 
 /**
  * Ordered migration list. Each entry appends; never reorder, never delete.
- * Empty in Unit 1 — Unit 2 fills.
+ *
+ * v0.1.1 Unit 2 (this commit):
+ *  - v1: initial schema (artifacts, agent_states, heartbeats, registry_meta,
+ *    pending_notices); mirrors Python `_apply_v1_schema` byte-for-byte for
+ *    KTD-B parity
+ *  - v2: validate pending_notices shape; formalize v1→v2 boundary per KTD-D
+ *  - v3: add agent_states.deadline_tick column per KTD-F watchdog A6 fix
+ *
+ * Future migrations (v4+) append here; the version-derived SCHEMA_USER_VERSION
+ * constant updates automatically.
  */
-export const MIGRATIONS: ReadonlyArray<Migration> = [];
+export const MIGRATIONS: ReadonlyArray<Migration> = [
+  V1_INITIAL,
+  V2_VALIDATE_PENDING_NOTICES,
+  V3_WATCHDOG_DEADLINE,
+];
 
 /**
  * Target schema version = max version in the list, or 0 if list is empty.
