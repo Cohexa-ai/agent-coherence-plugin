@@ -29,6 +29,8 @@ import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { randomUUID } from "node:crypto";
 import { runPendingMigrations, SCHEMA_USER_VERSION } from "./migrations.js";
+import { MESIState, isValidTransition, isWriter } from "./states.js";
+import { checkSingleWriter, checkMonotonicVersion } from "./invariants.js";
 
 /** Per KTD-K REVISED: per-lock-acquisition retry budget, NOT per-transaction. */
 export const BUSY_TIMEOUT_MS = 1500;
@@ -212,6 +214,394 @@ export class ArtifactRegistry {
       .prepare(`SELECT id, name, version, content_hash, size_tokens, last_writer_id, updated_at FROM artifacts`)
       .all() as ArtifactRow[];
     return rows.map(rowToArtifact);
+  }
+
+  // ------------------------------------------------------------------
+  // MESI write-path (Unit 2 commit 3)
+  // ------------------------------------------------------------------
+
+  /**
+   * Return per-agent MESI state map for an artifact. Returns empty map if
+   * no agent has ever touched it. Mirrors Python `get_state_map`.
+   */
+  getStateMap(artifactId: string): Map<string, MESIState> {
+    const rows = this.db
+      .prepare(`SELECT agent_id, state FROM agent_states WHERE artifact_id = ?`)
+      .all(artifactId) as { agent_id: string; state: string }[];
+    const map = new Map<string, MESIState>();
+    for (const r of rows) {
+      map.set(r.agent_id, r.state as MESIState);
+    }
+    return map;
+  }
+
+  /** Return one agent's MESI state for an artifact, or null if no row exists. */
+  getAgentState(artifactId: string, agentId: string): MESIState | null {
+    const row = this.db
+      .prepare(`SELECT state FROM agent_states WHERE artifact_id = ? AND agent_id = ?`)
+      .get(artifactId, agentId) as { state: string } | undefined;
+    return row === undefined ? null : (row.state as MESIState);
+  }
+
+  /**
+   * Acquire EXCLUSIVE for `agentId` on `artifactId`, invalidating any peers
+   * currently in M / E / S. Mirrors Python `CoordinatorService.write`
+   * (service.py:164) collapsed into a single registry-level transaction
+   * (per KTD-10 MESI subset: no transient states, no event bus).
+   *
+   * Side effects (all in one BEGIN IMMEDIATE):
+   * - For each peer in {M, E, S}: UPSERT agent_states to INVALID; UPSERT a
+   *   pending_notice with `agentId` as preempter and `nowUnixTs`.
+   * - UPSERT agent_states[agentId] to EXCLUSIVE; stamp granted_at_tick.
+   * - checkSingleWriter on the post-mutation state map → rollback if
+   *   violated.
+   *
+   * Returns the list of peer agent_ids that were invalidated (empty if no
+   * peers held the artifact). Caller uses this for `additionalContext`
+   * warning emission downstream.
+   */
+  acquireExclusive(artifactId: string, agentId: string, nowTick: number): string[] {
+    if (!this.hasArtifact(artifactId)) {
+      throw new Error(`acquireExclusive: artifact ${artifactId} not registered`);
+    }
+
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const stateMap = this.getStateMap(artifactId);
+      const invalidatedPeers: string[] = [];
+
+      for (const [peerId, peerState] of stateMap) {
+        if (peerId === agentId) continue;
+        if (peerState === MESIState.INVALID) continue;
+        if (!isValidTransition(peerState, MESIState.INVALID)) {
+          throw new Error(
+            `acquireExclusive: peer ${peerId} in ${peerState} cannot transition to INVALID`,
+          );
+        }
+        this.setAgentStateInternal(artifactId, peerId, peerState, MESIState.INVALID, nowTick, "write");
+        this.upsertPendingNotice(peerId, artifactId, agentId, nowTick);
+        invalidatedPeers.push(peerId);
+      }
+
+      const priorAgentState = stateMap.get(agentId) ?? MESIState.INVALID;
+      if (priorAgentState !== MESIState.EXCLUSIVE && priorAgentState !== MESIState.MODIFIED) {
+        if (!isValidTransition(priorAgentState, MESIState.EXCLUSIVE)) {
+          throw new Error(
+            `acquireExclusive: ${agentId} transition ${priorAgentState}→EXCLUSIVE not allowed`,
+          );
+        }
+        this.setAgentStateInternal(
+          artifactId,
+          agentId,
+          priorAgentState,
+          MESIState.EXCLUSIVE,
+          nowTick,
+          "write",
+        );
+      }
+
+      // Verify single-writer in same txn so violation rolls back.
+      const postMap = this.getStateMap(artifactId);
+      checkSingleWriter(postMap);
+
+      this.db.exec("COMMIT");
+      return invalidatedPeers;
+    } catch (err) {
+      try {
+        this.db.exec("ROLLBACK");
+      } catch {
+        // Rollback failure non-recoverable; surface original error.
+      }
+      throw err;
+    }
+  }
+
+  /**
+   * Commit a new content_hash + bump version. Caller MUST hold EXCLUSIVE or
+   * MODIFIED on the artifact (verified inside the BEGIN IMMEDIATE).
+   *
+   * Mirrors Python `CoordinatorService.commit` (service.py:216), collapsed
+   * into one transaction per KTD-10.
+   *
+   * Side effects (all in one BEGIN IMMEDIATE):
+   * - Verify agent_states[agentId] ∈ {EXCLUSIVE, MODIFIED}; raise otherwise
+   * - Bump artifacts.version (monotonicity invariant check)
+   * - Update artifacts.content_hash, last_writer_id, updated_at
+   * - For each peer ≠ agentId in {S}: UPSERT agent_states to INVALID + pending_notice
+   *   (any M/E peers would already be INVALID via acquireExclusive — they don't recur)
+   * - UPSERT agent_states[agentId] to MODIFIED
+   * - checkSingleWriter
+   *
+   * Returns the updated Artifact record.
+   */
+  commit(
+    artifactId: string,
+    agentId: string,
+    newContentHash: string,
+    nowTick: number,
+    sizeTokens: number | null = null,
+  ): { artifact: Artifact; invalidatedPeers: string[] } {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const artifactRow = this.db
+        .prepare(
+          `SELECT id, name, version, content_hash, size_tokens, last_writer_id, updated_at FROM artifacts WHERE id = ?`,
+        )
+        .get(artifactId) as ArtifactRow | undefined;
+      if (artifactRow === undefined) {
+        throw new Error(`commit: artifact ${artifactId} not registered`);
+      }
+
+      const agentState = this.getAgentState(artifactId, agentId);
+      if (agentState !== MESIState.EXCLUSIVE && agentState !== MESIState.MODIFIED) {
+        throw new Error(
+          `commit_not_allowed: agent=${agentId} artifact=${artifactId} state=${agentState ?? "INVALID"} ` +
+            `(must be EXCLUSIVE or MODIFIED to commit)`,
+        );
+      }
+
+      const nextVersion = artifactRow.version + 1;
+      checkMonotonicVersion(artifactRow.version, nextVersion);
+
+      const updatedAt = Date.now() / 1000;
+      this.db
+        .prepare(
+          `UPDATE artifacts
+             SET version = ?, content_hash = ?, size_tokens = COALESCE(?, size_tokens),
+                 last_writer_id = ?, updated_at = ?
+           WHERE id = ?`,
+        )
+        .run(nextVersion, newContentHash, sizeTokens, agentId, updatedAt, artifactId);
+
+      // Invalidate any SHARED peers. M/E peers should already be INVALID per
+      // single-writer + the acquireExclusive call that preceded this commit;
+      // if any are still M/E that's a single-writer violation that the
+      // post-commit checkSingleWriter will catch.
+      const stateMap = this.getStateMap(artifactId);
+      const invalidatedPeers: string[] = [];
+      for (const [peerId, peerState] of stateMap) {
+        if (peerId === agentId) continue;
+        if (peerState === MESIState.INVALID) continue;
+        if (!isValidTransition(peerState, MESIState.INVALID)) {
+          throw new Error(
+            `commit: peer ${peerId} in ${peerState} cannot transition to INVALID`,
+          );
+        }
+        this.setAgentStateInternal(artifactId, peerId, peerState, MESIState.INVALID, nowTick, "commit");
+        this.upsertPendingNotice(peerId, artifactId, agentId, nowTick);
+        invalidatedPeers.push(peerId);
+      }
+
+      // Transition agent E → M (or M → M no-op).
+      if (agentState === MESIState.EXCLUSIVE) {
+        this.setAgentStateInternal(artifactId, agentId, agentState, MESIState.MODIFIED, nowTick, "commit");
+      }
+      // If already MODIFIED, no transition needed — caller is committing again on a held grant.
+
+      // Single-writer invariant on post-state. Must hold post-mutation.
+      const postMap = this.getStateMap(artifactId);
+      checkSingleWriter(postMap);
+
+      // Re-fetch the updated artifact row for the return value.
+      const updatedRow = this.db
+        .prepare(
+          `SELECT id, name, version, content_hash, size_tokens, last_writer_id, updated_at FROM artifacts WHERE id = ?`,
+        )
+        .get(artifactId) as ArtifactRow;
+
+      this.db.exec("COMMIT");
+      return { artifact: rowToArtifact(updatedRow), invalidatedPeers };
+    } catch (err) {
+      try {
+        this.db.exec("ROLLBACK");
+      } catch {
+        // Rollback failure non-recoverable; surface original error.
+      }
+      throw err;
+    }
+  }
+
+  /**
+   * Release an agent's grant by transitioning to INVALID. Does NOT bump
+   * artifact.version — this is for Stop-hook cleanup of uncommitted grants
+   * per KTD-11. Mirrors Python `CoordinatorService.invalidate`.
+   *
+   * Safe to call on an agent that's already INVALID (no-op).
+   */
+  invalidate(artifactId: string, agentId: string, nowTick: number, trigger = "invalidate"): void {
+    if (!this.hasArtifact(artifactId)) {
+      return; // Delete-tombstone-style no-op for absent artifacts.
+    }
+
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const priorState = this.getAgentState(artifactId, agentId) ?? MESIState.INVALID;
+      if (priorState === MESIState.INVALID) {
+        this.db.exec("COMMIT");
+        return;
+      }
+      if (!isValidTransition(priorState, MESIState.INVALID)) {
+        throw new Error(
+          `invalidate: ${agentId} transition ${priorState}→INVALID not allowed`,
+        );
+      }
+      this.setAgentStateInternal(artifactId, agentId, priorState, MESIState.INVALID, nowTick, trigger);
+      this.db.exec("COMMIT");
+    } catch (err) {
+      try {
+        this.db.exec("ROLLBACK");
+      } catch {
+        // Rollback failure non-recoverable; surface original error.
+      }
+      throw err;
+    }
+  }
+
+  // ------------------------------------------------------------------
+  // Internal helpers (called within BEGIN IMMEDIATE from public methods)
+  // ------------------------------------------------------------------
+
+  /**
+   * UPSERT agent_states with granted_at_tick + last_reclaim slot bookkeeping
+   * mirroring Python `set_agent_state`. Caller MUST hold an open transaction.
+   *
+   * granted_at_tick semantics (per Python sqlite_registry.py:531-546):
+   * - new ∈ M/E AND old ∉ M/E → stamp granted_at_tick = nowTick; clear last_reclaim slots
+   * - new ∈ M/E AND old ∈ M/E → preserve granted_at_tick (continuous M∪E hold)
+   * - old ∈ M/E AND new ∉ M/E → drop granted_at_tick (release)
+   * - else → preserve
+   */
+  private setAgentStateInternal(
+    artifactId: string,
+    agentId: string,
+    priorState: MESIState,
+    newState: MESIState,
+    nowTick: number,
+    _trigger: string,
+  ): void {
+    const newInMe = isWriter(newState);
+    const prevInMe = isWriter(priorState);
+
+    // Look up prior granted_at_tick for the preserve case.
+    const priorRow = this.db
+      .prepare(`SELECT granted_at_tick FROM agent_states WHERE artifact_id = ? AND agent_id = ?`)
+      .get(artifactId, agentId) as { granted_at_tick: number | null } | undefined;
+    const priorGrantedAt = priorRow?.granted_at_tick ?? null;
+
+    let grantedAtTick: number | null;
+    let clearReclaim: boolean;
+    if (newInMe && !prevInMe) {
+      grantedAtTick = nowTick;
+      clearReclaim = true;
+    } else if (newInMe && prevInMe) {
+      grantedAtTick = priorGrantedAt;
+      clearReclaim = false;
+    } else if (prevInMe) {
+      grantedAtTick = null;
+      clearReclaim = false;
+    } else {
+      grantedAtTick = priorGrantedAt;
+      clearReclaim = false;
+    }
+
+    if (priorRow === undefined) {
+      this.db
+        .prepare(
+          `INSERT INTO agent_states (artifact_id, agent_id, state, granted_at_tick,
+                                     last_reclaim_trigger, last_reclaim_tick)
+           VALUES (?, ?, ?, ?, NULL, NULL)`,
+        )
+        .run(artifactId, agentId, newState, grantedAtTick);
+    } else if (clearReclaim) {
+      this.db
+        .prepare(
+          `UPDATE agent_states
+             SET state = ?, granted_at_tick = ?,
+                 last_reclaim_trigger = NULL, last_reclaim_tick = NULL
+           WHERE artifact_id = ? AND agent_id = ?`,
+        )
+        .run(newState, grantedAtTick, artifactId, agentId);
+    } else {
+      this.db
+        .prepare(
+          `UPDATE agent_states SET state = ?, granted_at_tick = ?
+           WHERE artifact_id = ? AND agent_id = ?`,
+        )
+        .run(newState, grantedAtTick, artifactId, agentId);
+    }
+  }
+
+  /**
+   * UPSERT a preemption notice. PRIMARY KEY (agent_id, artifact_id) means a
+   * second preemption on the same (victim, artifact) replaces the prior
+   * notice — latest preempter wins (matches Python sqlite_registry.py:937
+   * `INSERT … ON CONFLICT DO UPDATE WHERE excluded.preempted_at_unix_ts > …`).
+   */
+  private upsertPendingNotice(
+    victimAgentId: string,
+    artifactId: string,
+    preempterAgentId: string,
+    nowUnixTs: number,
+  ): void {
+    this.db
+      .prepare(
+        `INSERT INTO pending_notices (agent_id, artifact_id, preempter_agent_id, preempted_at_unix_ts)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT(agent_id, artifact_id) DO UPDATE
+           SET preempter_agent_id = excluded.preempter_agent_id,
+               preempted_at_unix_ts = excluded.preempted_at_unix_ts
+           WHERE excluded.preempted_at_unix_ts > pending_notices.preempted_at_unix_ts`,
+      )
+      .run(victimAgentId, artifactId, preempterAgentId, nowUnixTs);
+  }
+
+  /** Return + drain pending notices for one agent. Used by pre-read/pre-edit hooks. */
+  popPendingNoticesForAgent(agentId: string): Array<{
+    artifactId: string;
+    preempterAgentId: string;
+    preemptedAtUnixTs: number;
+  }> {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const rows = this.db
+        .prepare(
+          `SELECT artifact_id, preempter_agent_id, preempted_at_unix_ts
+             FROM pending_notices WHERE agent_id = ?`,
+        )
+        .all(agentId) as {
+        artifact_id: string;
+        preempter_agent_id: string;
+        preempted_at_unix_ts: number;
+      }[];
+      if (rows.length === 0) {
+        this.db.exec("COMMIT");
+        return [];
+      }
+      this.db.prepare(`DELETE FROM pending_notices WHERE agent_id = ?`).run(agentId);
+      this.db.exec("COMMIT");
+      return rows.map((r) => ({
+        artifactId: r.artifact_id,
+        preempterAgentId: r.preempter_agent_id,
+        preemptedAtUnixTs: r.preempted_at_unix_ts,
+      }));
+    } catch (err) {
+      try {
+        this.db.exec("ROLLBACK");
+      } catch {
+        // Rollback failure non-recoverable; surface original error.
+      }
+      throw err;
+    }
+  }
+
+  /** Active sessions = agents with at least one non-INVALID grant. For /status default tier. */
+  listActiveAgents(): string[] {
+    const rows = this.db
+      .prepare(
+        `SELECT DISTINCT agent_id FROM agent_states WHERE state != ?`,
+      )
+      .all(MESIState.INVALID) as { agent_id: string }[];
+    return rows.map((r) => r.agent_id);
   }
 
   isClosed(): boolean {

@@ -184,14 +184,18 @@ function handleStatus(req: IncomingMessage, res: ServerResponse, options: Server
     return;
   }
 
-  // Default tier. Wire tracked_artifacts now that Unit 2 added the registry
-  // surface; sessions stays empty until Unit 2 commit 3 lands the MESI
-  // write-path + agent_states reads.
+  // Default tier. Both tracked_artifacts and sessions wired from the registry's
+  // domain methods. agent_id is the UUID5 of the session_id, with no
+  // `claude-session-` prefix (the prefix only appears in the hook layer's
+  // agent_name field; the stored agent_id is already a bare UUID5 per KTD-K).
   const artifacts = options.registry.listArtifacts().map((a) => ({
     id: a.id,
     name: a.name, // Already repo-relative per the resolveOrRegister contract
     version: a.version,
   }));
+  const activeAgents = options.registry.listActiveAgents();
+  const sessions = activeAgents.map((agentId) => ({ agent_id: agentId }));
+
   const body: StatusDefaultBody = {
     status: "ok",
     backend: "node",
@@ -199,10 +203,10 @@ function handleStatus(req: IncomingMessage, res: ServerResponse, options: Server
     coordinator_uptime_seconds: uptimeSeconds,
     schema_version: schemaVersion,
     tracked_artifacts: artifacts,
-    sessions: [], // Unit 2 commit 3 fills with UUID5 agent_ids (stripped of claude-session- prefix per KTD-K)
+    sessions,
     counts: {
       tracked_artifacts: artifacts.length,
-      sessions: 0,
+      sessions: sessions.length,
     },
   };
   writeJson(res, 200, body);
