@@ -19,7 +19,7 @@
  *   - /status three-tier (KTD-K)
  *   - hook handler routes (Unit 3)
  */
-import { mkdirSync, writeFileSync, unlinkSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync, unlinkSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { hostname } from "node:os";
 import { ensureSecret } from "./auth.js";
@@ -77,6 +77,16 @@ async function main(): Promise<void> {
   const workspace = resolveWorkspace();
 
   mkdirSync(workspace.coherenceDir, { recursive: true, mode: 0o700 });
+  // KTD-13 + README "auto-gitignored" claim: write .coherence/.gitignore
+  // containing `*` so a careless `git add .` doesn't accidentally commit
+  // state.db (MESI state + agent UUIDs), hook.secret (a credential), or
+  // server.pid. Mirrors lifecycle._ensure_coherence_dir in the library's
+  // Python coordinator. Idempotent — only write if missing so operator
+  // customizations are never clobbered.
+  const gitignorePath = join(workspace.coherenceDir, ".gitignore");
+  if (!existsSync(gitignorePath)) {
+    writeFileSync(gitignorePath, "*\n", { mode: 0o600 });
+  }
   const secret = ensureSecret(workspace.coherenceDir);
 
   // Open the SQLite registry. Unit 1 ships with an empty MIGRATIONS list so
