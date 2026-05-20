@@ -1,0 +1,133 @@
+# Release workflow: tag-triggered build, SBOM generation, and GitHub release for the
+# Claude Code plugin coordinator.
+#
+# The plugin is consumed via `/plugin marketplace add` (not npm), so package.json is
+# marked `private: true` and there is intentionally no npm publish step.
+#
+# Triggers on tag push matching v*. The tag itself is the publish trigger; this file
+# landing in the repo does not produce a release on its own.
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+env:
+  NODE_VERSION: "20"
+
+jobs:
+  preflight:
+    name: Release-readiness preflight
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify tag format
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[a-z0-9.]+)?$ ]]; then
+            echo "Tag $RELEASE_TAG does not match required pattern v\\d+\\.\\d+\\.\\d+(-[a-z0-9.]+)?$"
+            exit 1
+          fi
+          echo "Tag $RELEASE_TAG matches required pattern"
+
+      # The readiness tool ships with Unit 9. If it has not landed yet, this step
+      # is a no-op rather than a hard failure so the workflow remains useful for
+      # earlier tagged releases.
+      - name: Verify release-readiness configuration
+        if: hashFiles('tools/check_release_readiness.js') != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: node tools/check_release_readiness.js
+
+  build:
+    name: Build distribution and SBOM
+    runs-on: ubuntu-latest
+    needs: [preflight]
+
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Verify tag matches package version
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          version=$(node -p "require('./package.json').version")
+          expected_tag="v${version}"
+          if [[ "$RELEASE_TAG" != "$expected_tag" ]]; then
+            echo "Release tag $RELEASE_TAG does not match package version $version (expected $expected_tag)"
+            exit 1
+          fi
+          echo "Release tag $RELEASE_TAG matches package version $version"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build distribution
+        run: npm run build
+
+      - name: Generate CycloneDX SBOM
+        run: npx --yes @cyclonedx/cyclonedx-npm@latest --output-file sbom.cyclonedx.json --output-format JSON
+
+      - name: Upload distribution artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+          retention-days: 30
+
+      - name: Upload SBOM artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom
+          path: sbom.cyclonedx.json
+          retention-days: 30
+
+  github-release:
+    name: Create GitHub Release with SBOM
+    runs-on: ubuntu-latest
+    needs: [build]
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download distribution artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Download SBOM
+        uses: actions/download-artifact@v4
+        with:
+          name: sbom
+          path: sbom/
+
+      - name: Package dist as tarball
+        run: tar -czf dist.tar.gz dist/
+
+      - name: Create GitHub release with dist tarball and SBOM
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist.tar.gz
+            sbom/sbom.cyclonedx.json
+          generate_release_notes: true
