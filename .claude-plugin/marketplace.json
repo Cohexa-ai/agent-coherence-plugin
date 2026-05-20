@@ -5,13 +5,13 @@
     "email": "vlad@agent-coherence.dev",
     "url": "https://agent-coherence.dev/code"
   },
-  "description": "Private alpha marketplace for the agent-coherence plugin. Surfaces stale-spec collisions across parallel Claude Code sessions in the same workspace.",
+  "description": "Self-hosted marketplace for the agent-coherence Claude Code plugin. Coherence for the prose subset of project rules that can't be expressed as policy.",
   "plugins": [
     {
       "name": "agent-coherence",
       "source": "./",
-      "description": "Stale-spec collision detector for parallel Claude Code sessions. Warns when one session is about to act on an artifact another session has updated. Requires `pip install agent-coherence` for the coordinator backend.",
-      "version": "0.1.0-alpha.1",
+      "description": "Coherence for the prose subset of project rules that can't be expressed as policy. CLAUDE.md rules about state — 'plan.md is v3 now', 'session B just edited the file you're about to write' — can't be expressed as permissions.deny. This plugin surfaces those state changes across parallel Claude Code sessions sharing the same workspace via warnings injected into the agent's own context. Single-user single-host workstation; macOS/Linux/WSL2. Warn-only in v0.1.1.",
+      "version": "0.1.1",
       "author": {
         "name": "Vlad Parakhin",
         "email": "vlad@agent-coherence.dev",
@@ -26,7 +26,10 @@
         "parallel-sessions",
         "agent-view",
         "worktree",
-        "stale-read"
+        "stale-read",
+        "mesi",
+        "cache-coherence",
+        "developer-tools"
       ]
     }
   ]
