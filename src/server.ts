@@ -23,6 +23,7 @@ import { verifyBearer, verifyHost } from "./auth.js";
 import type { ArtifactRegistry } from "./registry.js";
 import type { TrackedArtifactPolicy, PolicySummary } from "./policy.js";
 import type { SessionRegistry } from "./sessions.js";
+import { writeJson, writeError } from "./hooks/_common.js";
 import { preReadRoute } from "./hooks/pre_read.js";
 import { preEditRoute } from "./hooks/pre_edit.js";
 import { postEditRoute } from "./hooks/post_edit.js";
@@ -47,21 +48,6 @@ export interface ServerOptions {
   policy: TrackedArtifactPolicy;
   /** In-memory session_id ↔ agent_id map for hook handlers. */
   sessions: SessionRegistry;
-}
-
-interface ErrorEnvelope {
-  error: string;
-}
-
-function writeJson(res: ServerResponse, status: number, body: unknown): void {
-  res.statusCode = status;
-  res.setHeader("Content-Type", "application/json; charset=utf-8");
-  res.end(JSON.stringify(body));
-}
-
-function writeError(res: ServerResponse, status: number, message: string): void {
-  const envelope: ErrorEnvelope = { error: message };
-  writeJson(res, status, envelope);
 }
 
 /**

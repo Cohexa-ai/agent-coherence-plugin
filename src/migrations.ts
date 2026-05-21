@@ -60,8 +60,10 @@ export const MIGRATIONS: ReadonlyArray<Migration> = [
  * Target schema version = max version in the list, or 0 if list is empty.
  * Derived; do NOT hand-maintain a separate constant.
  */
-export const SCHEMA_USER_VERSION: number =
-  MIGRATIONS.length === 0 ? 0 : Math.max(...MIGRATIONS.map((m) => m.version));
+export const SCHEMA_USER_VERSION: number = MIGRATIONS.reduce(
+  (max, m) => Math.max(max, m.version),
+  0,
+);
 
 /**
  * Apply all pending migrations from current `PRAGMA user_version` to

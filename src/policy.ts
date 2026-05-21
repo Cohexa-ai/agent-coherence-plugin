@@ -160,9 +160,17 @@ function matchesAny(path: string, patterns: ReadonlyArray<string>): boolean {
  * `*` (zero-or-more chars within a segment, no `/`), `?` (one non-slash char).
  * Mirrors Python's _glob_match for KTD-B parity.
  */
+// Per-process cache of compiled glob patterns. Hot path: every hook on
+// every tracked-artifact lookup compiles `**` once per session otherwise.
+// ce-review safe_auto fix: pure memoization, no semantic change.
+const compiledGlobs: Map<string, RegExp> = new Map();
+
 export function globMatch(path: string, pattern: string): boolean {
-  const regexSrc = patternToRegex(pattern);
-  const regex = new RegExp("^" + regexSrc + "$");
+  let regex = compiledGlobs.get(pattern);
+  if (regex === undefined) {
+    regex = new RegExp("^" + patternToRegex(pattern) + "$");
+    compiledGlobs.set(pattern, regex);
+  }
   return regex.test(path);
 }
 

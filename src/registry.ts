@@ -107,6 +107,10 @@ export class ArtifactRegistry {
     this.db.pragma(`busy_timeout = ${BUSY_TIMEOUT_MS}`);
     // foreign_keys = ON matches Python coordinator's _apply_v1_schema setup.
     this.db.pragma("foreign_keys = ON");
+    // synchronous = NORMAL matches Python coordinator's sqlite_registry.py:181 —
+    // WAL default is NORMAL but Python sets it explicitly; mirror for parity.
+    // ce-review safe_auto fix per data-migrations finding 4.
+    this.db.pragma("synchronous = NORMAL");
 
     const result = runPendingMigrations(this.db);
     this.stats = {

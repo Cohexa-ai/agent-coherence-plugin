@@ -22,8 +22,9 @@ import { sessionToAgentId, sessionToAgentName } from "./agent_id.js";
 
 export class SessionRegistry {
   // Forward: agent_id → session_id. Used for last_writer_session_id lookup.
+  // Forward: session_id → agent_id. Avoids re-running uuid5 on every hook.
   private readonly bySessionId = new Map<string, string>();
-  // Reverse cache: session_id → agent_id. Avoids re-running uuid5 on every hook.
+  // Reverse: agent_id → session_id. Used for last_writer_session_id lookup.
   private readonly byAgentId = new Map<string, string>();
 
   /**

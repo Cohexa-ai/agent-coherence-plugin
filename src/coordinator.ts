@@ -28,7 +28,10 @@ import { ArtifactRegistry } from "./registry.js";
 import { TrackedArtifactPolicy } from "./policy.js";
 import { SessionRegistry } from "./sessions.js";
 
-const VERSION = "0.1.1-alpha.1";
+// Kept in sync manually with package.json/.claude-plugin/{plugin,marketplace}.json.
+// TODO(ce-review safe_auto follow-up): import from package.json via resolveJsonModule
+// once tsconfig is updated so check_versions_synced.js can guard a single source of truth.
+const VERSION = "0.1.1";
 
 interface Workspace {
   root: string;
