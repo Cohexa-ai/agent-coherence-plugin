@@ -19,6 +19,26 @@
             "command": "agent-coherence-hook-client pre-edit"
           }
         ]
+      },
+      {
+        "_comment": "KTD-N H4 mitigation — the model routes around a denied/warned Read via `bash cat plan.md`. Without a Bash PreToolUse matcher, that routing pattern silently bypasses the stale-read warning surface, leaving the plugin's coherence guarantee intact only for the literal Read tool. The pre-bash client subcommand extracts tracked-artifact paths from the Bash command string and forwards them to /hooks/pre-bash on the coordinator.",
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "agent-coherence-hook-client pre-bash"
+          }
+        ]
+      },
+      {
+        "_comment": "KTD-N H4 mitigation — Grep is another bypass route: a user-initiated or model-initiated grep over a directory containing tracked artifacts (CLAUDE.md, plan.md, etc.) should surface stale-read warnings for artifacts the session hasn't freshened since peer commits. The pre-grep client subcommand extracts the search root and forwards to /hooks/pre-grep on the coordinator, which enumerates registry-known tracked artifacts under the prefix.",
+        "matcher": "Grep",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "agent-coherence-hook-client pre-grep"
+          }
+        ]
       }
     ],
     "PostToolUse": [
