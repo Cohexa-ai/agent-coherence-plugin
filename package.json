@@ -11,8 +11,8 @@
   "scripts": {
     "build": "tsc",
     "watch": "tsc --watch",
-    "test": "node --test \"dist/test/**/*.test.js\"",
-    "test:src": "tsc && node --test \"dist/test/**/*.test.js\"",
+    "test": "node --test dist/test/*.test.js",
+    "test:src": "tsc && node --test dist/test/*.test.js",
     "clean": "rm -rf dist",
     "lint": "eslint src --ext .ts",
     "lint:fix": "eslint src --ext .ts --fix",
