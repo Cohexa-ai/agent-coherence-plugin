@@ -125,14 +125,28 @@ async function main(): Promise<void> {
   // Bind to ephemeral port on loopback. Per KTD-A.5 + Open Questions:
   // BIND_HOST = "127.0.0.1" is a code-level invariant; no operator override.
   server.listen(0, BIND_HOST, () => {
+    // ce-review correctness fix: the previous version threw from inside this
+    // callback. The throw becomes an uncaughtException at event-loop turn,
+    // produces a noisy stack trace, and leaves no pid file behind for the
+    // SessionStart hook to interrogate. Log + clean exit instead.
     const address = server.address();
     if (address === null || typeof address === "string") {
-      throw new Error(`unexpected server address shape: ${String(address)}`);
+      process.stderr.write(
+        `agent-coherence-coordinator: fatal: unexpected server address shape: ${String(address)}\n`,
+      );
+      process.exit(1);
     }
     const port = address.port;
 
-    writePidFile(workspace.pidFile, process.pid, port, "node");
-    writePortFile(workspace.portFile, port);
+    try {
+      writePidFile(workspace.pidFile, process.pid, port, "node");
+      writePortFile(workspace.portFile, port);
+    } catch (err) {
+      process.stderr.write(
+        `agent-coherence-coordinator: fatal: failed to write pid/port file: ${String(err)}\n`,
+      );
+      process.exit(1);
+    }
 
     logInfo(`spawned at ${BIND_HOST}:${port} (pid=${process.pid}, host=${hostname()})`);
     logInfo(`workspace=${workspace.root}; pid_file=${workspace.pidFile}`);

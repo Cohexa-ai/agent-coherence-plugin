@@ -29,9 +29,31 @@ export function writeError(res: ServerResponse, status: number, message: string)
 }
 
 /**
+ * Coordinator-side tick (epoch seconds). Centralized for parity with Python
+ * coordinator's `time.time()` / 1.0s tick semantics, and so hook handlers
+ * stop repeating `Math.floor(Date.now() / 1000)` inline.
+ *
+ * ce-review maintainability fix: was inlined at 4 hook call sites.
+ */
+export function nowTick(): number {
+  return Math.floor(Date.now() / 1000);
+}
+
+/**
+ * Per KTD-K + ce-review reliability finding (readJsonBody had no read timeout).
+ * Set to the watchdog handler deadline minus headroom so a stalled body read
+ * unblocks before the outer watchdog fires.
+ */
+export const BODY_READ_TIMEOUT_MS = 2000;
+
+/**
  * Drain request body up to `maxBytes`, parse as JSON object. Writes 400
  * error envelope and returns null on parse failure or oversize. Caller
  * should return immediately if null is returned.
+ *
+ * Enforces BODY_READ_TIMEOUT_MS so a stalled client (TCP open, no body) does
+ * not hold a handler slot indefinitely. Per ce-review reliability finding —
+ * pairs with the future A7 handler semaphore in Unit 4.
  */
 export async function readJsonBody(
   req: IncomingMessage,
@@ -42,6 +64,9 @@ export async function readJsonBody(
   let total = 0;
   try {
     await new Promise<void>((resolve, reject) => {
+      req.setTimeout(BODY_READ_TIMEOUT_MS, () => {
+        req.destroy(new Error("body read timeout"));
+      });
       req.on("data", (chunk: Buffer) => {
         total += chunk.length;
         if (total > maxBytes) {
@@ -55,8 +80,11 @@ export async function readJsonBody(
       req.on("error", (err) => reject(err));
     });
   } catch (err) {
-    if ((err as Error).message === "body too large") {
+    const message = (err as Error).message;
+    if (message === "body too large") {
       writeError(res, 413, "request body too large");
+    } else if (message === "body read timeout") {
+      writeError(res, 408, "request body read timeout");
     } else {
       writeError(res, 400, "could not read request body");
     }
