@@ -150,7 +150,7 @@ standard attestation verifier equivalent to PyPI's PEP 740.
 
 ### Underlying library
 
-The plugin requires `agent-coherence >= 0.8.0a1` on PyPI for the
+The plugin requires `agent-coherence >= 0.8.0` on PyPI for the
 `agent-coherence-coordinator` and `agent-coherence-hook-client` console
 scripts (when running the Python coordinator backend). The Python
 library's supply-chain controls are documented at

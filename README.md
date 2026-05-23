@@ -32,27 +32,26 @@ v0.1.1 ships the Node MESI-subset coordinator and the public marketplace catalog
 
 ```bash
 # Step 1 — install the Python library that provides the coordinator + hook client.
-# The plugin entry points ship in agent-coherence ≥ 0.8.0a1 (pre-release on PyPI,
-# released 2026-05-18). The `>=0.8.0a1` specifier opts pip into the pre-release.
-pip install "agent-coherence>=0.8.0a1"
+# The plugin entry points ship in agent-coherence ≥ 0.8.0 (stable on PyPI,
+# released 2026-05-23 alongside this plugin v0.1.1 cut).
+pip install "agent-coherence>=0.8.0"
 
 # Verify the required console scripts landed on PATH
 command -v agent-coherence-coordinator
 command -v agent-coherence-hook-client
 
 # Step 2 — register this repo as a Claude Code marketplace, then install the plugin
-claude plugin marketplace add hipvlady/agent-coherence-plugin
+claude plugin marketplace add hipvlady/agent-coherence-plugin@v0.1.1
 claude plugin install agent-coherence@agent-coherence
 ```
 
 After install, restart any running `claude` sessions in your workspace so the new SessionStart hook fires.
 
-> **Pre-release note.** `0.8.0a1` is the first PyPI release that ships
-> `agent-coherence-coordinator` and `agent-coherence-hook-client` (the
-> earlier `0.7.x` line was the LangGraph/CrewAI/AutoGen drop-in only).
-> The `>=0.8.0a1` specifier opts pip into the pre-release; a stable
-> `0.8.0` follows once the alpha cohort signs off. Release page:
-> [hipvlady/agent-coherence v0.8.0a1](https://github.com/hipvlady/agent-coherence/releases/tag/v0.8.0a1).
+> **Library compatibility.** `agent-coherence>=0.8.0` is the first stable PyPI
+> release that ships `agent-coherence-coordinator` and `agent-coherence-hook-client`
+> (the earlier `0.7.x` line was the LangGraph/CrewAI/AutoGen drop-in only; the
+> `0.8.0a1` pre-release was the marketplace-cohort alpha). Release page:
+> [hipvlady/agent-coherence v0.8.0](https://github.com/hipvlady/agent-coherence/releases/tag/v0.8.0).
 
 ### Scope (v0.1.1)
 
