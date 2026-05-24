@@ -1,0 +1,17 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Q&A — usage questions, design discussion
+    url: https://github.com/hipvlady/agent-coherence-plugin/discussions/categories/q-a
+    about: For questions about how to use the plugin, design discussion, or anything that isn't a bug or feature request, GitHub Discussions is the better surface — answers stay searchable for the next person with the same question.
+  - name: Strict-mode feedback
+    url: https://github.com/hipvlady/agent-coherence-plugin/discussions/categories/strict-mode-feedback
+    about: Sharing your strict_mode.yaml config, asking about the deny behavior, reporting unexpected denies — strict-mode Discussions category. Bugs (e.g., the wire shape is wrong) still go to the bug-report template above.
+  - name: v0.2 upgrade reports
+    url: https://github.com/hipvlady/agent-coherence-plugin/discussions/categories/v02-upgrade-reports
+    about: First-impression and post-upgrade reports during the v0.2 broad-beta 14-day monitoring window. Even "upgraded fine, no issues" reports are useful signal.
+  - name: Show & Tell
+    url: https://github.com/hipvlady/agent-coherence-plugin/discussions/categories/show-and-tell
+    about: Show how you've integrated agent-coherence into your workflow, post your tracked.yaml conventions, share a workflow tweak that pairs well with the plugin.
+  - name: Security vulnerability report
+    url: https://github.com/hipvlady/agent-coherence-plugin/security
+    about: For security-class issues (auth bypass, secret exposure, file-content disclosure), use GitHub's private vulnerability report feature OR email security@agent-coherence.dev — please do NOT open a public issue.
