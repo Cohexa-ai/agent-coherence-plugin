@@ -173,12 +173,21 @@ Replace `X.Y.Z` with the target version (e.g. `0.1.2`) throughout.
 
     ```bash
     claude
-    # inside Claude Code:
-    /plugin marketplace add hipvlady/agent-coherence-plugin@vX.Y.Z
+    # inside Claude Code — un-pinned (canonical) form per the v0.2 broad-beta
+    # decision lock; resolves to the latest published tag:
+    /plugin marketplace add hipvlady/agent-coherence-plugin
     /plugin install agent-coherence@agent-coherence
     ```
 
+    For operators who need to pin a specific version (CI / reproducibility), use:
+
+    ```bash
+    /plugin marketplace add hipvlady/agent-coherence-plugin@vX.Y.Z
+    ```
+
     Confirm the plugin loads (no errors on `SessionStart`, hooks visible in `/hooks`).
+
+11. **Broad-beta gates (v0.2.0 and any later tag introducing a new public surface).** Walk through the BB1-BB8 rubric in [`docs/BROAD_BETA.md`](BROAD_BETA.md) before pushing the tag. The broad-beta playbook also covers the 14-day post-launch monitoring window and the rollback runbook. Skip this step for patch tags that only fix regressions in already-shipped behavior.
 
 ---
 
@@ -211,6 +220,53 @@ Use this when a critical security or correctness fix must land on `main` immedia
    git merge main
    git push origin dev
    ```
+
+---
+
+---
+
+## 4. Upgrade procedure — MANDATORY `hook.secret` rotation on v0.2 (KTD-W)
+
+When an operator upgrades from v0.1.x to v0.2.x (or any future tag that changes the threat model under which the bearer token was issued), the `hook.secret` MUST be rotated before strict-mode hard guardrails take effect. Secrets generated under the old threat model are insufficient to bridge the upgrade — the canonical rationale is in the v0.2 plan KTD-W.
+
+This is an OPERATOR step, not an automated one. The plugin cannot rotate the secret on the operator's behalf without disrupting in-flight `claude` sessions; the operator is the only authority that can decide when it's safe.
+
+### Procedure
+
+```bash
+# 1. Stop ALL running `claude` sessions in the workspace.
+#    The coordinator is lazy-spawned per-workspace; it will exit when no
+#    sessions hold open hook clients.
+
+# 2. Verify no coordinator process is still alive.
+cd <repo>
+cat .coherence/server.pid 2>/dev/null
+# If a PID is listed, kill it:
+kill $(head -1 .coherence/server.pid) 2>/dev/null
+
+# 3. Remove the old secret.
+rm .coherence/hook.secret
+
+# 4. Restart any `claude` session in the workspace. The first PreToolUse
+#    hook fires, which spawns the coordinator, which generates a fresh
+#    32-byte secret at .coherence/hook.secret (mode 0o600).
+
+# 5. Verify the new secret landed.
+ls -la .coherence/hook.secret
+# Expect: -rw------- (mode 0o600), size 64 bytes (32 hex-encoded bytes).
+
+# 6. Confirm hooks fire under the new secret.
+agent-coherence-status --self-test
+# Expect: exit 0, 4 steps green.
+```
+
+### Why this is mandatory, not advisory
+
+v0.1.1's threat model treated the bearer secret as protection against Adversary 1 (same-user co-tenant code) only. v0.2's strict-mode hard guardrails (`permissionDecision: "deny"`) extend the trust boundary the secret protects — a leaked v0.1.1 secret used by a same-user adversary in v0.2 could trigger denials the operator never intended, undermining the operator's strict-mode policy. Rotating ensures the operator's v0.2 deployment runs entirely under a secret minted under v0.2's threat assumptions.
+
+### Hot rotation deferred
+
+`agent-coherence-coordinator --rotate-secret` (rotate without stopping sessions) is a v0.2.x backlog item. v0.2 ships the manual stop-rotate-restart path documented above.
 
 ---
 

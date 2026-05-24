@@ -1,0 +1,55 @@
+title: "[v0.2 Upgrade] "
+labels: ["v0.2-upgrade"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Welcome — this is the **v0.2 Upgrade Reports** category. First-impression and post-upgrade reports during the 14-day broad-beta monitoring window. Even "upgraded fine, no issues" reports are useful signal — they tell the maintainer the upgrade path is working.
+
+        If you hit a P0 issue (data-corrupting, auth-bypassing), please open a [bug report](https://github.com/hipvlady/agent-coherence-plugin/issues/new?template=bug_report.md) instead so it lands in the triage queue. Use this category for everything else.
+
+  - type: dropdown
+    id: outcome
+    attributes:
+      label: Upgrade outcome
+      options:
+        - "Worked first try, no issues"
+        - "Worked after some setup fiddling — describe below"
+        - "Hit a non-blocker issue — described below"
+        - "Hit a P0 issue (file separately as a bug report, not here)"
+    validations:
+      required: true
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: Notes
+      description: "What you observed during the upgrade. Especially helpful: anything the [docs/RELEASE.md section 4 hook.secret rotation procedure](https://github.com/hipvlady/agent-coherence-plugin/blob/main/docs/RELEASE.md) didn't cover, or any unexpected behavior on the first post-upgrade `claude` session."
+      placeholder: "Rotated hook.secret per the docs. First session spawned the coordinator + fresh secret as expected. agent-coherence-status --self-test exited 0."
+    validations:
+      required: true
+
+  - type: input
+    id: from_version
+    attributes:
+      label: Upgraded from
+      placeholder: "v0.1.1"
+    validations:
+      required: true
+
+  - type: input
+    id: to_version
+    attributes:
+      label: Upgraded to
+      placeholder: "v0.2.0"
+    validations:
+      required: true
+
+  - type: input
+    id: env
+    attributes:
+      label: Environment
+      description: OS + coordinator backend (default is python).
+      placeholder: "macOS 14 / coordinator_backend=python"
+    validations:
+      required: false

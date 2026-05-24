@@ -1,0 +1,33 @@
+title: "[Show & Tell] "
+labels: ["show-and-tell"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Welcome — this is the **Show & Tell** category. Share how you've integrated agent-coherence into your workflow, post your `tracked.yaml` conventions, or talk about a workflow tweak that pairs well with the plugin. Other operators benefit from seeing real-world setups.
+
+  - type: textarea
+    id: setup
+    attributes:
+      label: What you built / how you use it
+      description: The setup, the workflow, what problem it solves for you. Screenshots / terminal recordings welcome.
+      placeholder: "I have 3 parallel claude sessions in worktrees that all coordinate on docs/plans/. My tracked.yaml looks like ..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: tracked_yaml
+    attributes:
+      label: Your tracked.yaml / strict_mode.yaml (optional)
+      description: Operators learn a lot from each other's policy configs. Paste yours if you're willing.
+      render: yaml
+    validations:
+      required: false
+
+  - type: textarea
+    id: lessons
+    attributes:
+      label: What worked, what didn't (optional)
+      description: Anything that surprised you, footguns you discovered, or wins you wouldn't have found in the README.
+    validations:
+      required: false

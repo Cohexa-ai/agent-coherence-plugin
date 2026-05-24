@@ -1,11 +1,13 @@
-# Marketplace listing copy (v0.1.1 submission prep)
+# Marketplace listing copy (v0.2.0 broad-beta refresh)
 
-**Status**: pre-written copy for the v0.1.1 marketplace catalog submission.
-v0.1.1 ships as a single-command install (`claude plugin marketplace add
-hipvlady/agent-coherence-plugin@v0.1.1`) via the Node MESI-subset coordinator.
-The Python coordinator path remains available for the alpha cohort —
-`pip install "agent-coherence>=0.8.0"` from PyPI (stable as of 2026-05-23
-when 0.8.0 promoted from the 0.8.0a1 alpha pre-release).
+**Status**: copy refreshed for the v0.2.0 broad-beta launch. v0.2 ships
+strict mode (`permissionDecision: "deny"` on stale-read of opted-in
+artifacts) on top of v0.1.1's marketplace baseline. The library
+prerequisite is now `agent-coherence>=0.8.0` (stable; the earlier
+`0.8.0a1` pre-release alias is no longer required — strict mode itself
+needs `>=0.9.0` once published). Canonical install drops the `@v0.1.1`
+pin per the 2026-05-23 broad-beta canonicalization decision (Unit 9 of
+the v0.2 plan).
 
 **Format**: this file is structured for the Claude Code marketplace's
 expected fields. Copy verbatim into the submission form / PR.
@@ -22,7 +24,7 @@ agent-coherence
 
 ## One-paragraph description (≤ 300 chars)
 
-> CLAUDE.md rules about *state* — "plan.md is v3 now", "session B just edited the file you're about to write" — can't be expressed as permissions.deny. agent-coherence is the runtime layer that surfaces those state changes across parallel Claude Code sessions. macOS / Linux / WSL2. Warn-only in v0.1.1.
+> CLAUDE.md rules about *state* — "plan.md is v3 now", "session B just edited the file you're about to write" — can't be expressed as permissions.deny. agent-coherence is the runtime layer that surfaces those state changes across parallel Claude Code sessions. macOS / Linux / WSL2. Warn-mode + per-artifact opt-in strict mode (v0.2).
 
 ## Long description (marketplace detail page)
 
@@ -76,17 +78,28 @@ The agent decides what to do — typically re-read before acting. No platform fi
 ### Install
 
 ```bash
-# v0.1.1 path (when published):
-pip install agent-coherence
+# Library (provides the coordinator + hook client console scripts):
+pip install "agent-coherence>=0.8.0"
 
-# Add the marketplace + install
+# Add the marketplace + install (canonical un-pinned form — resolves to
+# the latest published tag per the v0.2 broad-beta canonicalization).
 claude plugin marketplace add hipvlady/agent-coherence-plugin
 claude plugin install agent-coherence@agent-coherence
+```
+
+For operators who need to pin a specific version (CI / reproducibility):
+
+```bash
+claude plugin marketplace add hipvlady/agent-coherence-plugin@v0.2.0
 ```
 
 Measured install time: 27s end-to-end (R1 target: <30s).
 
 After install, restart any running `claude` sessions in your workspace so the SessionStart hook fires.
+
+### Upgrading from v0.1.1
+
+Strict mode (v0.2) extends the trust boundary the `hook.secret` token protects. Operators upgrading from v0.1.1 MUST rotate the secret before strict-mode hard guardrails take effect — secrets generated under v0.1.1's warn-only threat model are insufficient to bridge the upgrade. Procedure documented in [`docs/RELEASE.md`](RELEASE.md) section 4 (KTD-W).
 
 ### Validation
 
@@ -149,10 +162,9 @@ Apache-2.0
 
 ## Submission checklist
 
-- [x] Library published to PyPI as `agent-coherence>=0.8.0` (stable
-      release 2026-05-23; the earlier `0.8.0a1` pre-release was the
-      marketplace-cohort alpha; measured install time ≈ 3s in fresh
-      py3.13 venv, 2026-05-18 AS-phpmac walkthrough)
+- [x] Library published to PyPI as `agent-coherence>=0.8.0a1` (drops
+      `pip install` from git+ to standard PyPI; measured install time
+      ≈ 3s in fresh py3.13 venv, 2026-05-18 AS-phpmac walkthrough)
 - [ ] Demo asset recorded and committed under `docs/demos/`
 - [x] N=40 launch gate run completed (per Unit 9) with score ≥70% —
       2026-05-18, two consecutive runs against live `claude` v2.1.131:

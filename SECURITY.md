@@ -165,21 +165,26 @@ surface; the Python backend has the fuller feature set.
 
 ## Reporting security issues
 
-For now (v0.1.1), report security issues via:
+Report security issues via either of:
 
 1. **Preferred — private vulnerability report**: GitHub's "Report a
    vulnerability" feature on
    [hipvlady/agent-coherence-plugin/security](https://github.com/hipvlady/agent-coherence-plugin/security).
    Private disclosure channel, not visible to the public.
-2. **Fallback — bug template**: open an issue at
-   [hipvlady/agent-coherence-plugin/issues](https://github.com/hipvlady/agent-coherence-plugin/issues)
-   using the bug template, and mark the issue private via GitHub's
-   vulnerability reports feature if the channel above is unavailable.
+2. **Email**: `security@agent-coherence.dev`. Forwards to the
+   maintainer's inbox; the alias exists specifically so security
+   reporters don't need a GitHub account. Use this if you're reporting
+   on behalf of an organization that prefers email-based disclosure or
+   if the GitHub channel is unavailable.
 
-We aim to respond within 72 hours.
+**Response-time SLA**: 72 hours to first response. P0 issues (auth
+bypass, secret exposure, file-content disclosure) get a patch target
+of 7 days. The rollback runbook in [docs/BROAD_BETA.md](docs/BROAD_BETA.md)
+documents the procedure if a published release needs to be pulled.
 
-**TODO (v0.2)**: dedicated `security@` alias for off-GitHub disclosure. Not
-yet provisioned.
+Please do NOT open a public Issue for security-class reports. The bug
+report template includes an explicit redirect to the security channel
+for this case.
 
 ## Known limitations
 

@@ -1,0 +1,11 @@
+# CODEOWNERS for agent-coherence-plugin
+#
+# The maintainer is the default owner of every file. GitHub auto-assigns
+# review requests + surfaces ownership in the PR sidebar. See
+# https://docs.github.com/en/repositories/managing-your-repositories-settings-and-features/customizing-your-repository/about-code-owners
+# for the syntax reference.
+#
+# This project is single-maintainer; the wildcard ownership is intentional.
+# Adding additional owners would require an explicit maintainer decision.
+
+* @hipvlady
