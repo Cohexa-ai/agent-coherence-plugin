@@ -77,7 +77,7 @@ claude --include-hook-events --output-format stream-json "Read docs/plans/featur
 | `agent-coherence-migrate-rules` | Scan CLAUDE.md for prose tool-class rules; propose + optionally `--apply` `permissions.deny` entries | First-pass migration of `"use rg, not grep"`-style rules to enforceable policy |
 | `agent-coherence-migrate-deny` *(v0.9.0+)* | Stricter sibling: STDOUT-only, symlink-contained, never invokes an LLM, never writes settings.json | Security-sensitive workspaces; CI-driven migration where auto-apply is not acceptable |
 
-Slash commands shell out to the corresponding console scripts; calling the CLI directly works identically. `bin/ensure-coordinator` uses the same path internally.
+Slash commands shell out to the corresponding console scripts; calling the CLI directly works identically. The plugin ships PATH-resolver shims at `bin/agent-coherence-{status,track,untrack,migrate-deny}` that probe for the real binary (PATH first, then `<cwd>/.venv/bin/`, then `<git-root>/.venv/bin/`) before falling back to an actionable error. This means the slash commands work whether or not the operator activated the project venv before launching `claude` — including Claude UI / remote-control sessions that inherit a system shell env without venv activation. `bin/ensure-coordinator` is the SessionStart sibling shim using the same probing pattern.
 
 ## Getting started
 
