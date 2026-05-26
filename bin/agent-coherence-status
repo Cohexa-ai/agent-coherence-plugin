@@ -1,0 +1,77 @@
+#!/usr/bin/env bash
+# agent-coherence plugin: PATH-resolver shim for the agent-coherence-status
+# console script.
+#
+# Why this shim exists (2026-05-26 Phase E broad-beta monitoring finding):
+# Claude Code adds the plugin's bin/ directory to the Bash tool's PATH per
+# https://code.claude.com/docs/en/plugins-reference. The /agent-coherence:status
+# skill template invokes `agent-coherence-status` as a bare command. In
+# environments where the operator launched `claude` without activating the
+# project venv (e.g., Claude UI / remote-control session inheriting a system
+# shell env, or operators running with a (base) conda env that lacks
+# `pip install agent-coherence`), the bare command resolves to nothing on
+# system PATH — exit 127 "command not found". This shim probes the operator's
+# environment for the real binary and execs it; on failure it surfaces an
+# actionable error pointing at the install + venv-activation paths.
+#
+# Sibling to bin/ensure-coordinator (SessionStart hook) — same probing pattern,
+# applied to operator-facing skill console scripts.
+
+set -uo pipefail
+
+NAME="agent-coherence-status"
+
+# Resolve ourselves so we can skip our own entry when iterating PATH (the
+# plugin's bin/ is on PATH per Claude Code contract; without this skip we'd
+# recurse). `pwd -P` resolves symlinks so the comparison is robust.
+self_dir="$(cd "$(dirname "$0")" 2>/dev/null && pwd -P)"
+
+# Probe 1: iterate PATH, exec the first candidate that isn't ourselves.
+# Covers the common case where the operator activated the venv before
+# launching claude (or pip-installed agent-coherence globally).
+IFS=':' read -ra PATH_ENTRIES <<< "$PATH"
+for dir in "${PATH_ENTRIES[@]}"; do
+  [ -z "$dir" ] && continue
+  candidate="$dir/$NAME"
+  if [ -x "$candidate" ]; then
+    candidate_dir="$(cd "$(dirname "$candidate")" 2>/dev/null && pwd -P)"
+    if [ "$candidate_dir" != "$self_dir" ]; then
+      exec "$candidate" "$@"
+    fi
+  fi
+done
+
+# Probe 2: walk from CWD up to git root, looking for .venv/bin/<NAME>.
+# Covers the operator who created a project-local venv but didn't activate
+# it before launching claude — common with `python -m venv .venv`.
+cwd_candidate="./.venv/bin/$NAME"
+if [ -x "$cwd_candidate" ]; then
+  exec "$cwd_candidate" "$@"
+fi
+git_root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+if [ -n "$git_root" ] && [ -x "$git_root/.venv/bin/$NAME" ]; then
+  exec "$git_root/.venv/bin/$NAME" "$@"
+fi
+
+# Probe 3: give up with an actionable error. Mirrors bin/ensure-coordinator's
+# "console script not on PATH" stderr message shape so operators searching
+# logs find consistent wording across the plugin's surface.
+cat >&2 <<EOF
+agent-coherence: $NAME not found on PATH.
+
+The Python library (agent-coherence>=0.9.0) provides this command. Two paths
+to make it reachable from this Claude session:
+
+  1. Activate the project venv BEFORE launching claude:
+       cd <your project> && source .venv/bin/activate && claude
+     Note: remote-control / Claude UI sessions inherit the env claude was
+     launched in. Re-launching after activation propagates the PATH.
+
+  2. Install the library into your default Python env:
+       pip install "agent-coherence>=0.9.0"
+
+See plugin README "Allowlisting the plugin's bundled binaries" section for
+the workspace-local .claude/settings.local.json snippet that allowlists
+this command, and the upstream Issue for plugin-shipped PATH defaults.
+EOF
+exit 127
