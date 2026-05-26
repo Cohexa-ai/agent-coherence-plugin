@@ -264,7 +264,7 @@ If your `.claude/settings.local.json` already exists, merge the `permissions.all
 
 If your team wants the same allowlist committed for everyone, put the block in `.claude/settings.json` (workspace-shared, version-controlled) instead. Same shape, different file.
 
-The plugin-shipped path requires a Claude Code platform change — tracked in [upstream Issue TBD] (filed against `anthropics/claude-code` per the Phase E broad-beta monitoring window 2026-05-26).
+The plugin-shipped path requires a Claude Code platform change — tracked in [anthropics/claude-code#62616](https://github.com/anthropics/claude-code/issues/62616) (filed 2026-05-26 per the Phase E broad-beta monitoring window).
 
 ## v0.2 known limitations
 
