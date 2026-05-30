@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/hipvlady/agent-coherence-plugin/actions/workflows/ci.yml/badge.svg)](https://github.com/hipvlady/agent-coherence-plugin/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/hipvlady/agent-coherence-plugin)](https://github.com/hipvlady/agent-coherence-plugin/releases)
-[![License](https://img.shields.io/github/license/hipvlady/agent-coherence-plugin)](LICENSE)
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![Library](https://img.shields.io/pypi/v/agent-coherence?label=agent-coherence)](https://pypi.org/project/agent-coherence/)
 
 **Coherence for the prose subset of project rules that can't be expressed as policy.**
@@ -66,18 +66,25 @@ claude --include-hook-events --output-format stream-json "Read docs/plans/featur
 
 ## Commands
 
-| Surface | What it does | When to use |
+The plugin itself ships **three slash commands** (in `commands/`). These are the only surfaces the plugin exposes directly — they appear the moment you `/plugin install`:
+
+| Plugin slash command | What it does | When to use |
 |---|---|---|
 | `/agent-coherence:status` | Show tracked artifacts, current versions, sessions × MESI state | Daily sanity check; pre-commit verification |
 | `/agent-coherence:track <path>` | Add a path to the coordinator's tracked set | When the operator wants stale-read coverage on a new file |
 | `/agent-coherence:untrack <path>` | Remove a path from coordination | When the operator wants to silence warnings on intentionally-divergent files |
+
+Everything below is a **library console script** installed by `pip install "agent-coherence>=0.8.0"` (next section) — *not* shipped by the plugin. The three slash commands above shell out to them, and you can also call them directly:
+
+| Library console script | What it does | When to use |
+|---|---|---|
 | `agent-coherence-coordinator` | Spawn / inspect the lazy-spawned local HTTP coordinator | Manual recovery; backend-switch via `--prepare-for-migration` |
 | `agent-coherence-status` | CLI form of `/agent-coherence:status`; supports `--detail metrics` + `--self-test` | Post-install validation (`--self-test`); dashboard scraping (`--detail metrics`) |
 | `agent-coherence-hook-client` | Subprocess called by the plugin's command-type hooks | Internal — not for direct invocation |
 | `agent-coherence-migrate-rules` | Scan CLAUDE.md for prose tool-class rules; propose + optionally `--apply` `permissions.deny` entries | First-pass migration of `"use rg, not grep"`-style rules to enforceable policy |
-| `agent-coherence-migrate-deny` *(v0.9.0+)* | Stricter sibling: STDOUT-only, symlink-contained, never invokes an LLM, never writes settings.json | Security-sensitive workspaces; CI-driven migration where auto-apply is not acceptable |
+| `agent-coherence-migrate-deny` *(library v0.8.2+)* | Stricter sibling: STDOUT-only, symlink-contained, never invokes an LLM, never writes settings.json | Security-sensitive workspaces; CI-driven migration where auto-apply is not acceptable |
 
-Slash commands shell out to the corresponding console scripts; calling the CLI directly works identically. The plugin ships PATH-resolver shims at `bin/agent-coherence-{status,track,untrack,migrate-deny}` that probe for the real binary (PATH first, then `<cwd>/.venv/bin/`, then `<git-root>/.venv/bin/`) before falling back to an actionable error. This means the slash commands work whether or not the operator activated the project venv before launching `claude` — including Claude UI / remote-control sessions that inherit a system shell env without venv activation. `bin/ensure-coordinator` is the SessionStart sibling shim using the same probing pattern.
+To bridge the two, the plugin ships PATH-resolver shims at `bin/agent-coherence-{status,track,untrack,migrate-deny}` that probe for the real binary (PATH first, then `<cwd>/.venv/bin/`, then `<git-root>/.venv/bin/`) before falling back to an actionable error. This means the slash commands work whether or not the operator activated the project venv before launching `claude` — including Claude UI / remote-control sessions that inherit a system shell env without venv activation. `bin/ensure-coordinator` is the SessionStart sibling shim using the same probing pattern.
 
 ## Getting started
 
@@ -117,7 +124,7 @@ After install, restart any running `claude` sessions in your workspace so the ne
 > **Library compatibility.** `agent-coherence>=0.8.0` is the first stable PyPI
 > release that ships `agent-coherence-coordinator` and `agent-coherence-hook-client`
 > (the earlier `0.7.x` line was the LangGraph/CrewAI/AutoGen drop-in only). v0.2
-> strict mode requires `agent-coherence>=0.9.0` once published; warn-mode (the
+> strict mode requires `agent-coherence>=0.8.2`; warn-mode (the
 > default) works against `>=0.8.0`. Release page:
 > [hipvlady/agent-coherence](https://github.com/hipvlady/agent-coherence/releases).
 
@@ -152,7 +159,7 @@ What happens when a strict + tracked artifact is read stale:
 
 **Strict mode is operator opt-in per artifact. Never global.** A literal `**` in `strict_mode_paths` triggers a startup warning (the coordinator counts matching tracked artifacts; default threshold is 50). The plugin will never silently lock down a workspace.
 
-For tool-class restrictions (`grep` → `rg`, no `python -c`, no `sudo`), the structurally stronger primitive is `permissions.deny` at the configuration layer. `agent-coherence-migrate-deny` (v0.9.0+) is the security-hardened helper: STDOUT-only (never writes settings.json), symlink-contained (canonical-path containment check refuses files outside the workspace root), never invokes an LLM. Operator reviews the output and pastes into `.claude/settings.local.json`.
+For tool-class restrictions (`grep` → `rg`, no `python -c`, no `sudo`), the structurally stronger primitive is `permissions.deny` at the configuration layer. `agent-coherence-migrate-deny` (library v0.8.2+) is the security-hardened helper: STDOUT-only (never writes settings.json), symlink-contained (canonical-path containment check refuses files outside the workspace root), never invokes an LLM. Operator reviews the output and pastes into `.claude/settings.local.json`.
 
 ```bash
 agent-coherence-migrate-deny --workspace . | jq
@@ -171,8 +178,8 @@ The coordinator creates `.coherence/` at your repo root automatically. Inside it
 | `server.pid` | Coordinator process discovery (`<pid>\n<port>\nbackend=...\n`). | ✓ |
 | `tracked.yaml` | Your opt-in patterns (gitignore-style globs). Commit if you want the tracked set to apply across team checkouts. | Operator's choice |
 | `ignored.yaml` | Your opt-out patterns. Same. | Operator's choice |
-| `strict_mode.yaml` *(v0.9.0+)* | Per-artifact strict-mode opt-in. Same shape. Same intersection semantics with `tracked_paths`. | Operator's choice |
-| `audit.log` *(v0.9.0+)* | Append-only JSONL of strict-mode denial events. Mode `0600`. Denials only — no command bodies, no user content. | ✓ |
+| `strict_mode.yaml` *(library v0.8.2+)* | Per-artifact strict-mode opt-in. Same shape. Same intersection semantics with `tracked_paths`. | Operator's choice |
+| `audit.log` *(library v0.8.2+)* | Append-only JSONL of strict-mode denial events. Mode `0600`. Denials only — no command bodies, no user content. | ✓ |
 
 **Note on `allowedHttpHookUrls`**: hooks are *command-type* (the `agent-coherence-hook-client` subprocess makes the HTTP call internally), not Claude Code's HTTP-type hooks. The `allowedHttpHookUrls` Claude Code policy does NOT apply to this plugin — no allowlist changes are required to install.
 
