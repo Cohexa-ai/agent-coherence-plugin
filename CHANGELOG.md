@@ -8,7 +8,36 @@ The canonical release-notes surface is [GitHub Releases](https://github.com/hipv
 
 ## [Unreleased]
 
-No unreleased work yet — `v0.2.0` (broad-beta launch) shipped on 2026-05-24.
+No unreleased work.
+
+## [0.2.2] — 2026-06-02
+
+**Docs/chore housekeeping — public-repo hygiene.** No runtime, hook, or packaged-artifact changes; the coordinator and all console scripts are unchanged. This release only adjusts what the public marketplace repo tracks and tidies the README.
+
+### Changed
+
+- README: split the console-scripts reference into slash-command vs. library-script surfaces, and corrected the version labels and license badge.
+
+### Removed
+
+- Dropped maintainer-internal material from public version control (kept locally): `CLAUDE.md`, `docs/BROAD_BETA.md`, `docs/BROAD_BETA_ANNOUNCEMENT.md`, `docs/RELEASE.md`, `docs/marketplace-listing-copy.md`, and `docs/demos/2026-05-17-stale-read-demo-script.md`. These are operational notes that should not ship in the public repo.
+
+## [0.2.1] — 2026-05-26
+
+**Operator-console shims + install-troubleshooting patch.**
+
+### Added
+
+- **PATH-resolver `bin/` shims** for the operator-facing console scripts (`agent-coherence-status`, `-track`, `-untrack`, `-migrate-deny`, `ensure-coordinator`), so bare invocations resolve even when the project virtualenv isn't active in the operator's shell. ([#43](https://github.com/hipvlady/agent-coherence-plugin/pull/43))
+
+### Documentation
+
+- README allowlist troubleshooting for the per-command permission prompts on the console scripts. ([#42](https://github.com/hipvlady/agent-coherence-plugin/pull/42))
+- Bug 8 troubleshooting now points at the filed upstream issue (anthropics/claude-code#62616).
+
+### Licensing
+
+- Added the Apache-2.0 `LICENSE` file to back the manifest's license declaration. ([#30](https://github.com/hipvlady/agent-coherence-plugin/pull/30), [#31](https://github.com/hipvlady/agent-coherence-plugin/pull/31))
 
 ## [0.2.0] — 2026-05-24 (broad-beta launch)
 
