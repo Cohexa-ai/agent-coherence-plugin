@@ -21,7 +21,7 @@
   },
   "dependencies": {
     "@types/js-yaml": "^4.0.9",
-    "@types/uuid": "^10.0.0",
+    "@types/uuid": "^11.0.0",
     "better-sqlite3": "^12.10.0",
     "js-yaml": "^4.1.1",
     "uuid": "^14.0.0"
