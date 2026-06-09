@@ -107,7 +107,7 @@ First-time experience: on your first Read of a tracked file in a workspace, you'
 /plugin install agent-coherence@agent-coherence
 ```
 
-The marketplace add resolves to the latest published release. To pin a specific version: `/plugin marketplace add hipvlady/agent-coherence-plugin@v0.2.0`.
+The marketplace add resolves to the latest published release. To pin a specific version: `/plugin marketplace add hipvlady/agent-coherence-plugin@v0.2.2`.
 
 You also need the Python library that provides the coordinator + hook client:
 
@@ -251,7 +251,7 @@ pytest -m protocol_corpus
 
 ### Allowlisting the plugin's bundled binaries
 
-The plugin ships five console scripts (`agent-coherence-status`, `agent-coherence-track`, `agent-coherence-untrack`, `agent-coherence-coordinator`, `agent-coherence-migrate-deny`). Claude Code's per-command permission gate fires on each one unless they're in your workspace's `permissions.allow`. To suppress the prompts, append this block to your `.claude/settings.local.json` (workspace-local, per-user, gitignored by default):
+The plugin's slash commands and SessionStart hook invoke five console-script binaries: four shipped as `bin/` shims (`agent-coherence-status`, `agent-coherence-track`, `agent-coherence-untrack`, `agent-coherence-migrate-deny`) plus the library's `agent-coherence-coordinator`. Claude Code's per-command permission gate fires on each one unless they're in your workspace's `permissions.allow`. To suppress the prompts, append this block to your `.claude/settings.local.json` (workspace-local, per-user, gitignored by default):
 
 ```json
 {
