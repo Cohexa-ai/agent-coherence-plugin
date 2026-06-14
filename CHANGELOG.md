@@ -8,7 +8,13 @@ The canonical release-notes surface is [GitHub Releases](https://github.com/hipv
 
 ## [Unreleased]
 
-No unreleased work.
+### Fixed
+
+- **Cross-runtime migration-ledger collision on the shared `state.db` ([#55](https://github.com/hipvlady/agent-coherence-plugin/issues/55)).** The Node coordinator now fails closed when it opens a `state.db` written under the sibling Python coordinator's ledger, instead of running its own v3 migration on it (which added `agent_states.deadline_tick` and stamped `user_version=3`, after which the Python coordinator refused to reopen its own store). Detection mirrors the Python guard: a foreign `registry_meta.schema_runtime` stamp, the Python-only `artifact_versions` table, or the Python `artifacts.owner_generation` fence column raise a typed `CrossRuntimeSchemaError` (`reason = "cross_runtime_schema"`) before any migration runs. Node now stamps `registry_meta.schema_runtime = "node"` on create and back-fills it on migrate, so detection is symmetric from both sides. `user_version == 1` remains indistinguishable by design (the Node v1 schema mirrors Python v1 byte-for-byte).
+
+### Changed
+
+- **Removed destructive `rm state.db` recovery advice.** Now that the shared store holds durable retained version content and live coordination state, the schema-mismatch error, the v2 shape-mismatch error, and the README troubleshooting rows no longer advise deleting `state.db` / `.coherence/`; the secret-rotation step removes only `.coherence/hook.secret`.
 
 ## [0.2.2] — 2026-06-02
 

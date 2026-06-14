@@ -52,8 +52,11 @@ function shapeMismatchError(reason: string): Error {
     `Migration v2 (validate pending_notices): SHAPE MISMATCH — ${reason}. ` +
       `This is a bug; the canonical shape is documented in migration v1 and Python's ` +
       `sqlite_registry.py _apply_v1_schema. Do NOT 'fix' state.db by hand. Recovery: ` +
-      `stop all coordinator processes, back up state.db, remove it, restart (loses ` +
-      `cache; no source-of-record data lost per v0.1 plan KTD-13).`,
+      `stop all coordinator processes and upgrade to a coordinator build that ` +
+      `understands this schema. Do NOT remove state.db by hand — as of the ` +
+      `durable-retention schema (issue #55) it holds retained version content and ` +
+      `live coordination state; the "no source-of-record data lost" assurance from ` +
+      `the v0.1 plan KTD-13 no longer holds.`,
   );
 }
 
