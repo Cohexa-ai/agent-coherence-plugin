@@ -95,9 +95,13 @@ export const V1_INITIAL: Migration = {
         )
       `);
 
+      // schema_runtime: the cross-runtime lineage stamp (issue #55), seeded
+      // inside THIS creation transaction so the sibling Python coordinator's
+      // guard can fail closed on an explicit marker. Literals mirror
+      // migrations.ts SCHEMA_RUNTIME_KEY / SCHEMA_RUNTIME_NODE.
       db.prepare(
-        `INSERT INTO registry_meta (key, value) VALUES (?, ?), (?, ?)`,
-      ).run("instance_id", instanceId, "sequence_number", "0");
+        `INSERT INTO registry_meta (key, value) VALUES (?, ?), (?, ?), (?, ?)`,
+      ).run("instance_id", instanceId, "sequence_number", "0", "schema_runtime", "node");
 
       // PRAGMA inside BEGIN IMMEDIATE is transactional per SQLite docs.
       // Cannot use parameter bindings; integer literal interpolation is safe.
