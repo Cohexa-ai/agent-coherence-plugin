@@ -23,7 +23,7 @@
     "@types/js-yaml": "^4.0.9",
     "@types/uuid": "^11.0.0",
     "better-sqlite3": "^12.10.0",
-    "js-yaml": "^4.2.0",
+    "js-yaml": "^5.2.1",
     "uuid": "^14.0.0"
   },
   "devDependencies": {
