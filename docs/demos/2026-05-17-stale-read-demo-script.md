@@ -89,7 +89,7 @@ on the seed). End on `agent-coherence-status` showing the artifact
 state.
 
 **Voice-over / caption**: *"Install via `pip install agent-coherence`
-+ `claude plugin marketplace add hipvlady/agent-coherence-plugin`. 27
++ `claude plugin marketplace add Cohexa-ai/agent-coherence-plugin`. 27
 seconds end-to-end. Private alpha for ~10 hand-picked installers; book
 a discovery call at agent-coherence.dev/code."*
 

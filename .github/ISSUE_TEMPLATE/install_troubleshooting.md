@@ -66,4 +66,4 @@ Steps you've already run. Saves the maintainer from suggesting things you've alr
 
 **Triage SLA**
 
-Install-troubleshooting issues are triaged within 72h. Many are quick — the diagnostic sections above usually surface the cause without needing back-and-forth. If your issue is install-related but security-sensitive (e.g., `hook.secret` leaked, `pip` installed an unexpected dependency), please report via the [security tab](https://github.com/hipvlady/agent-coherence-plugin/security) instead.
+Install-troubleshooting issues are triaged within 72h. Many are quick — the diagnostic sections above usually surface the cause without needing back-and-forth. If your issue is install-related but security-sensitive (e.g., `hook.secret` leaked, `pip` installed an unexpected dependency), please report via the [security tab](https://github.com/Cohexa-ai/agent-coherence-plugin/security) instead.

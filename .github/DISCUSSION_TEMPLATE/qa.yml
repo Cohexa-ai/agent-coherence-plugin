@@ -7,9 +7,9 @@ body:
         Welcome — this is the **Q&A** category. Use it for usage questions, design discussion, or anything that isn't a tracked bug or feature request.
 
         Before posting:
-        - Search [existing Discussions](https://github.com/hipvlady/agent-coherence-plugin/discussions) for the same question
-        - Skim the [README](https://github.com/hipvlady/agent-coherence-plugin/blob/main/README.md) and the [FAQ section](https://github.com/hipvlady/agent-coherence-plugin/blob/main/README.md#faq)
-        - If it's a bug (the plugin did something wrong), use the [bug report template](https://github.com/hipvlady/agent-coherence-plugin/issues/new?template=bug_report.md) instead
+        - Search [existing Discussions](https://github.com/Cohexa-ai/agent-coherence-plugin/discussions) for the same question
+        - Skim the [README](https://github.com/Cohexa-ai/agent-coherence-plugin/blob/main/README.md) and the [FAQ section](https://github.com/Cohexa-ai/agent-coherence-plugin/blob/main/README.md#faq)
+        - If it's a bug (the plugin did something wrong), use the [bug report template](https://github.com/Cohexa-ai/agent-coherence-plugin/issues/new?template=bug_report.md) instead
 
   - type: textarea
     id: question
