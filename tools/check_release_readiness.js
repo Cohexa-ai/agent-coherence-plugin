@@ -36,7 +36,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 
-const FALLBACK_SLUG = 'hipvlady/agent-coherence-plugin';
+const FALLBACK_SLUG = 'Cohexa-ai/agent-coherence-plugin';
 const TAG_PATTERN = 'v*';
 const EXPECTED_TAG_REF = `refs/tags/${TAG_PATTERN}`;
 

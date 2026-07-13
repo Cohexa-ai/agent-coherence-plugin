@@ -37,10 +37,10 @@
     "prettier": "^3.0.0",
     "typescript": "^6.0.3"
   },
-  "homepage": "https://github.com/hipvlady/agent-coherence-plugin",
+  "homepage": "https://github.com/Cohexa-ai/agent-coherence-plugin",
   "repository": {
     "type": "git",
-    "url": "https://github.com/hipvlady/agent-coherence-plugin.git"
+    "url": "https://github.com/Cohexa-ai/agent-coherence-plugin.git"
   },
   "license": "Apache-2.0"
 }

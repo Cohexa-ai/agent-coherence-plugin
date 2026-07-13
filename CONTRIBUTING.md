@@ -6,14 +6,14 @@ Thanks for considering a contribution. This plugin is a single-maintainer projec
 
 | Surface | Where it lives | When to use |
 |---|---|---|
-| Bug reports | [Issues](https://github.com/hipvlady/agent-coherence-plugin/issues/new?template=bug_report.md) | The plugin did something wrong. 72h triage SLA. |
-| Install issues | [Issues — install template](https://github.com/hipvlady/agent-coherence-plugin/issues/new?template=install_troubleshooting.md) | The install isn't working. 72h triage SLA. |
-| Feature requests | [Issues — feature template](https://github.com/hipvlady/agent-coherence-plugin/issues/new?template=feature_request.md) | A new feature you'd like. No SLA. |
-| Q&A / design discussion | [Discussions — Q&A](https://github.com/hipvlady/agent-coherence-plugin/discussions/categories/q-a) | A question without a clear "the plugin did X" answer. Lower-friction than an Issue. |
-| Sharing your setup | [Discussions — Show & Tell](https://github.com/hipvlady/agent-coherence-plugin/discussions/categories/show-and-tell) | Your `tracked.yaml` / `strict_mode.yaml` config, workflow tweaks. |
-| Strict-mode feedback | [Discussions — Strict Mode](https://github.com/hipvlady/agent-coherence-plugin/discussions/categories/strict-mode) | First-impressions, design questions, unexpected denies (not bugs). |
-| v0.2 upgrade reports | [Discussions — v0.2 Upgrade Reports](https://github.com/hipvlady/agent-coherence-plugin/discussions/categories/v02-upgrade-reports) | Post-upgrade signal during the 14-day broad-beta monitoring window. |
-| Security issues | [security@agent-coherence.dev](mailto:security@agent-coherence.dev) or [GitHub security tab](https://github.com/hipvlady/agent-coherence-plugin/security) | Anything that could compromise auth, secrets, or file content. **Do not open a public Issue.** 72h response SLA. |
+| Bug reports | [Issues](https://github.com/Cohexa-ai/agent-coherence-plugin/issues/new?template=bug_report.md) | The plugin did something wrong. 72h triage SLA. |
+| Install issues | [Issues — install template](https://github.com/Cohexa-ai/agent-coherence-plugin/issues/new?template=install_troubleshooting.md) | The install isn't working. 72h triage SLA. |
+| Feature requests | [Issues — feature template](https://github.com/Cohexa-ai/agent-coherence-plugin/issues/new?template=feature_request.md) | A new feature you'd like. No SLA. |
+| Q&A / design discussion | [Discussions — Q&A](https://github.com/Cohexa-ai/agent-coherence-plugin/discussions/categories/q-a) | A question without a clear "the plugin did X" answer. Lower-friction than an Issue. |
+| Sharing your setup | [Discussions — Show & Tell](https://github.com/Cohexa-ai/agent-coherence-plugin/discussions/categories/show-and-tell) | Your `tracked.yaml` / `strict_mode.yaml` config, workflow tweaks. |
+| Strict-mode feedback | [Discussions — Strict Mode](https://github.com/Cohexa-ai/agent-coherence-plugin/discussions/categories/strict-mode) | First-impressions, design questions, unexpected denies (not bugs). |
+| v0.2 upgrade reports | [Discussions — v0.2 Upgrade Reports](https://github.com/Cohexa-ai/agent-coherence-plugin/discussions/categories/v02-upgrade-reports) | Post-upgrade signal during the 14-day broad-beta monitoring window. |
+| Security issues | [security@agent-coherence.dev](mailto:security@agent-coherence.dev) or [GitHub security tab](https://github.com/Cohexa-ai/agent-coherence-plugin/security) | Anything that could compromise auth, secrets, or file content. **Do not open a public Issue.** 72h response SLA. |
 | Code contributions | Pull Requests | Patches that fix a bug, add a feature, improve docs. See "PR posture" below. |
 
 ## Triage SLA
@@ -57,7 +57,7 @@ Before opening a PR, verify:
 - [ ] Tests pass locally: `npm run test:src`
 - [ ] Typecheck clean: `npx tsc --noEmit`
 - [ ] Build clean: `npm run build`
-- [ ] If the PR adds a new behavior on the Python coordinator side, the [library repo](https://github.com/hipvlady/agent-coherence)'s `tests/protocol_corpus/` covers it (or a follow-up PR will). Cross-impl wire-shape drift is a P0 regression class.
+- [ ] If the PR adds a new behavior on the Python coordinator side, the [library repo](https://github.com/Cohexa-ai/agent-coherence)'s `tests/protocol_corpus/` covers it (or a follow-up PR will). Cross-impl wire-shape drift is a P0 regression class.
 - [ ] If the PR touches `package.json`, `.claude-plugin/plugin.json`, or `.claude-plugin/marketplace.json` version fields, all three stay in sync (the pre-commit hook will reject mismatches).
 - [ ] [CHANGELOG.md](CHANGELOG.md) `[Unreleased]` section has an entry (Added / Changed / Fixed / Security / Internal — pick the right subheading).
 - [ ] PR title follows conventional commits (`feat:` / `fix:` / `docs:` / `refactor:` / `chore:`).
@@ -70,7 +70,7 @@ Before opening a PR, verify:
 
 ## Architecture references
 
-- The canonical design lives in the [library repo](https://github.com/hipvlady/agent-coherence)'s `docs/plans/` directory. Read the most recent v0.X plan before proposing architectural changes.
+- The canonical design lives in the [library repo](https://github.com/Cohexa-ai/agent-coherence)'s `docs/plans/` directory. Read the most recent v0.X plan before proposing architectural changes.
 - The plugin's hook surface is documented in [hooks/hooks.json](hooks/hooks.json) with inline comments explaining the KTD-N H4 mitigation, the command-type-vs-HTTP-type rationale (Phase E.0 probe 2A), and the SessionStart hook contract.
 - Wire-shape parity between Python and Node coordinators is enforced by the library's `tests/protocol_corpus/` suite — any plugin-side change that affects the wire shape needs a matching fixture there.
 

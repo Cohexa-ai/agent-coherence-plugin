@@ -52,7 +52,7 @@ Three new counters in `/status?detail=metrics`: `strict_mode_denials_total`, `st
 
 ```bash
 pip install "agent-coherence>=0.9.0"   # strict-mode wire shape requires 0.9.0+
-claude plugin marketplace add hipvlady/agent-coherence-plugin
+claude plugin marketplace add Cohexa-ai/agent-coherence-plugin
 claude plugin install agent-coherence@agent-coherence
 ```
 
@@ -69,8 +69,8 @@ v0.1.1 secrets were generated under the warn-only threat model and are insuffici
 ```html
 <header>
   <h1>agent-coherence v0.2 — strict mode, open broad beta</h1>
-  <p>Per-artifact opt-in <code>permissionDecision: "deny"</code> on stale reads across 5 hooked tool surfaces. Static deny text byte-stable across retries (Phase 0 H1 falsified). Multi-model validated on haiku, sonnet, opus. <a href="https://github.com/hipvlady/agent-coherence-plugin/releases/tag/v0.2.0">Release notes →</a></p>
-  <pre><code>claude plugin marketplace add hipvlady/agent-coherence-plugin
+  <p>Per-artifact opt-in <code>permissionDecision: "deny"</code> on stale reads across 5 hooked tool surfaces. Static deny text byte-stable across retries (Phase 0 H1 falsified). Multi-model validated on haiku, sonnet, opus. <a href="https://github.com/Cohexa-ai/agent-coherence-plugin/releases/tag/v0.2.0">Release notes →</a></p>
+  <pre><code>claude plugin marketplace add Cohexa-ai/agent-coherence-plugin
 claude plugin install agent-coherence@agent-coherence</code></pre>
   <p class="meta">Broad-beta open YYYY-MM-DD · macOS / Linux / WSL2 · Apache-2.0</p>
 </header>
@@ -104,9 +104,9 @@ claude plugin install agent-coherence@agent-coherence</code></pre>
 >
 > Plus: `TERMINAL_DENIAL_CLASSES` structural security invariant + AST-based meta-test that prevents future contributors from silently weakening the boundary. `agent-coherence-migrate-deny` — STDOUT-only, symlink-contained, never invokes an LLM.
 >
-> Install: `claude plugin marketplace add hipvlady/agent-coherence-plugin`
+> Install: `claude plugin marketplace add Cohexa-ai/agent-coherence-plugin`
 >
-> Notes: github.com/hipvlady/agent-coherence-plugin/releases/tag/v0.2.0
+> Notes: github.com/Cohexa-ai/agent-coherence-plugin/releases/tag/v0.2.0
 
 ### X / Mastodon (short, ≤ 280 chars)
 
@@ -114,7 +114,7 @@ claude plugin install agent-coherence@agent-coherence</code></pre>
 >
 > Per-artifact opt-in `permissionDecision: "deny"` on stale reads. 5-surface hook coverage (Read/Edit/Write/Bash/Grep) closes the H4 routing pattern. Static deny text byte-stable across retries (Phase 0 H1 falsified).
 >
-> `claude plugin marketplace add hipvlady/agent-coherence-plugin`
+> `claude plugin marketplace add Cohexa-ai/agent-coherence-plugin`
 
 ---
 

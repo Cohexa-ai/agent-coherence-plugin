@@ -4,7 +4,7 @@ All notable changes to the `agent-coherence` Claude Code plugin are documented h
 
 Alpha — APIs and the `hooks.json` wire shape may change before `v1.0`.
 
-The canonical release-notes surface is [GitHub Releases](https://github.com/hipvlady/agent-coherence-plugin/releases); this file mirrors that history in a structured format for operators who prefer a single browsable timeline.
+The canonical release-notes surface is [GitHub Releases](https://github.com/Cohexa-ai/agent-coherence-plugin/releases); this file mirrors that history in a structured format for operators who prefer a single browsable timeline.
 
 ## [Unreleased]
 
@@ -26,7 +26,7 @@ No unreleased work yet — `v0.2.0` (broad-beta launch) shipped on 2026-05-24.
 
 - **README depth-parity overhaul** (149 → 335 lines) following the EveryInc/compound-engineering-plugin section sequence: Philosophy + Quick Example + expanded Commands table + Strict Mode + Architecture + Local Development + FAQ + About Contributions. Plugin README is the broad-beta launch surface for first-time operators.
 - **`docs/BROAD_BETA.md`** — BB1-BB8 launch-readiness rubric (replaces the v0.1.1 G12 alpha-cohort hold), 14-day post-launch monitoring procedure, rollback runbook.
-- **Canonical un-pinned install** — `/plugin marketplace add hipvlady/agent-coherence-plugin` resolves to the latest published catalog tag. Pinned-version install (`@v0.2.0`) documented as the secondary path for operators who need version stability.
+- **Canonical un-pinned install** — `/plugin marketplace add Cohexa-ai/agent-coherence-plugin` resolves to the latest published catalog tag. Pinned-version install (`@v0.2.0`) documented as the secondary path for operators who need version stability.
 - **Public-feedback intake hardening** — 3 issue templates (bug / feature / install-troubleshooting), 4 seeded Discussion templates, `security@agent-coherence.dev` alias provisioned (closes the v0.1.1 SECURITY.md `TODO (v0.2)` item), CODE_OF_CONDUCT.md (Contributor Covenant 2.1), CONTRIBUTING.md (maintainer-curated PR posture, 72h triage SLA on bugs), PRIVACY.md (explicit no-telemetry).
 - **`CHANGELOG.md` at repo root** (this file) — Keep-a-Changelog format, mirrors GitHub Releases for operators who want a single browsable timeline.
 
@@ -49,7 +49,7 @@ See the README [v0.2 known limitations](README.md#v02-known-limitations) table f
 
 ## [0.1.1] — 2026-05-23
 
-**Marketplace cohort listing.** Promotes the v0.1.0-alpha.1 private alpha to a publicly-installable marketplace catalog entry. Single-command install via `/plugin marketplace add hipvlady/agent-coherence-plugin@v0.1.1` + `/plugin install agent-coherence@agent-coherence`. Ships with full 78-finding ce-review remediation pass against the library.
+**Marketplace cohort listing.** Promotes the v0.1.0-alpha.1 private alpha to a publicly-installable marketplace catalog entry. Single-command install via `/plugin marketplace add Cohexa-ai/agent-coherence-plugin@v0.1.1` + `/plugin install agent-coherence@agent-coherence`. Ships with full 78-finding ce-review remediation pass against the library.
 
 ### Added — Node MESI-subset coordinator
 
@@ -72,7 +72,7 @@ See the README [v0.2 known limitations](README.md#v02-known-limitations) table f
 
 ### Plugin coexistence
 
-- `package.json` is `"private": true` by design. Distribution is via the Claude Code marketplace catalog, not npm. The plugin is consumed via `/plugin marketplace add hipvlady/agent-coherence-plugin@v0.1.1`, which clones the tagged Git ref directly.
+- `package.json` is `"private": true` by design. Distribution is via the Claude Code marketplace catalog, not npm. The plugin is consumed via `/plugin marketplace add Cohexa-ai/agent-coherence-plugin@v0.1.1`, which clones the tagged Git ref directly.
 
 ## [0.1.0-alpha.1] — 2026-05-18
 

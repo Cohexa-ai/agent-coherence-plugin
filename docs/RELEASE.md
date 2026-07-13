@@ -39,7 +39,7 @@ Require PR review + the five CI status check contexts. Strict mode means the PR 
 The context names below MUST match the job display names in `.github/workflows/ci.yml` verbatim — GitHub matches on the `name:` field of each job (and per-matrix variant). Update this list if the workflow's job names change.
 
 ```bash
-gh api -X PUT repos/hipvlady/agent-coherence-plugin/branches/main/protection \
+gh api -X PUT repos/Cohexa-ai/agent-coherence-plugin/branches/main/protection \
   --input - <<'JSON'
 {
   "required_status_checks": {
@@ -61,7 +61,7 @@ JSON
 Require the same five status check contexts. No review required — `dev` is a fast-moving integration branch.
 
 ```bash
-gh api -X PUT repos/hipvlady/agent-coherence-plugin/branches/dev/protection \
+gh api -X PUT repos/Cohexa-ai/agent-coherence-plugin/branches/dev/protection \
   --input - <<'JSON'
 {
   "required_status_checks": {
@@ -80,7 +80,7 @@ JSON
 Only admins can push release tags. Deletion and non-fast-forward updates are blocked.
 
 ```bash
-gh api -X POST repos/hipvlady/agent-coherence-plugin/rulesets \
+gh api -X POST repos/Cohexa-ai/agent-coherence-plugin/rulesets \
   --input - <<'JSON'
 {
   "name": "Protect v* tags",
@@ -175,14 +175,14 @@ Replace `X.Y.Z` with the target version (e.g. `0.1.2`) throughout.
     claude
     # inside Claude Code — un-pinned (canonical) form per the v0.2 broad-beta
     # decision lock; resolves to the latest published tag:
-    /plugin marketplace add hipvlady/agent-coherence-plugin
+    /plugin marketplace add Cohexa-ai/agent-coherence-plugin
     /plugin install agent-coherence@agent-coherence
     ```
 
     For operators who need to pin a specific version (CI / reproducibility), use:
 
     ```bash
-    /plugin marketplace add hipvlady/agent-coherence-plugin@vX.Y.Z
+    /plugin marketplace add Cohexa-ai/agent-coherence-plugin@vX.Y.Z
     ```
 
     Confirm the plugin loads (no errors on `SessionStart`, hooks visible in `/hooks`).
@@ -274,7 +274,7 @@ v0.1.1's threat model treated the bearer secret as protection against Adversary 
 
 ### Why no `npm publish`?
 
-`package.json` is marked `"private": true`. The plugin is consumed via `/plugin marketplace add hipvlady/agent-coherence-plugin@vX.Y.Z`, which clones the tagged Git ref directly — not via the npm registry. The Node coordinator artifact is built into `dist/` on each user's machine via `npm ci` on first `SessionStart`, so there's nothing to publish to a package registry.
+`package.json` is marked `"private": true`. The plugin is consumed via `/plugin marketplace add Cohexa-ai/agent-coherence-plugin@vX.Y.Z`, which clones the tagged Git ref directly — not via the npm registry. The Node coordinator artifact is built into `dist/` on each user's machine via `npm ci` on first `SessionStart`, so there's nothing to publish to a package registry.
 
 ### Why SBOM in releases?
 

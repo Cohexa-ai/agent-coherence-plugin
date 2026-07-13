@@ -83,14 +83,14 @@ pip install "agent-coherence>=0.8.0"
 
 # Add the marketplace + install (canonical un-pinned form — resolves to
 # the latest published tag per the v0.2 broad-beta canonicalization).
-claude plugin marketplace add hipvlady/agent-coherence-plugin
+claude plugin marketplace add Cohexa-ai/agent-coherence-plugin
 claude plugin install agent-coherence@agent-coherence
 ```
 
 For operators who need to pin a specific version (CI / reproducibility):
 
 ```bash
-claude plugin marketplace add hipvlady/agent-coherence-plugin@v0.2.0
+claude plugin marketplace add Cohexa-ai/agent-coherence-plugin@v0.2.0
 ```
 
 Measured install time: 27s end-to-end (R1 target: <30s).
@@ -115,9 +115,9 @@ claude --include-hook-events --output-format stream-json "your prompt"
 
 ### Source
 
-- Plugin: https://github.com/hipvlady/agent-coherence-plugin
-- Underlying library: https://github.com/hipvlady/agent-coherence
-- Issue tracker: https://github.com/hipvlady/agent-coherence-plugin/issues
+- Plugin: https://github.com/Cohexa-ai/agent-coherence-plugin
+- Underlying library: https://github.com/Cohexa-ai/agent-coherence
+- Issue tracker: https://github.com/Cohexa-ai/agent-coherence-plugin/issues
 
 ### License
 
@@ -155,8 +155,8 @@ Apache-2.0
 | Min Claude Code version | 2.1.131 |
 | Max Claude Code version | (open) |
 | Author | Vlad Parakhin <vlad@agent-coherence.dev> |
-| Source URL | https://github.com/hipvlady/agent-coherence-plugin |
-| Marketplace URL | https://github.com/hipvlady/agent-coherence-plugin |
+| Source URL | https://github.com/Cohexa-ai/agent-coherence-plugin |
+| Marketplace URL | https://github.com/Cohexa-ai/agent-coherence-plugin |
 | License | Apache-2.0 |
 | Categories | developer-tools, multi-agent |
 
@@ -172,7 +172,7 @@ Apache-2.0
       degenerate_rate=5%, 14:36 wall. Run #2 re-read=33 / ack=7 /
       ignored=0 / degenerate=0, score=100%, degenerate_rate=0%, 17:07
       wall. Harness fix that made the gate reliably runnable:
-      [hipvlady/agent-coherence#27](https://github.com/hipvlady/agent-coherence/pull/27)
+      [Cohexa-ai/agent-coherence#27](https://github.com/Cohexa-ai/agent-coherence/pull/27)
 - [ ] AS-phpmac walkthrough re-run on a fresh machine against PyPI
       install path
 - [ ] At least 3 alpha installers have completed onboarding without
