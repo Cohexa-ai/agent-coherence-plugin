@@ -141,20 +141,37 @@ test("bin shim: probe 3 — no binary anywhere → exit 127 + actionable stderr"
   }
 });
 
-test("bin shim: all 4 shims differ only in the NAME variable", () => {
-  // Drift defense: future authors editing one shim must update all four.
-  // Canonical is agent-coherence-status; other three should differ by
-  // ONLY the substring of the bare command name.
+test("bin shim: CLI shims differ only in NAME + Node-CLI entry; migrate-deny lacks only Probe 0", () => {
+  // Drift defense (updated zero-Python Unit 5): the three CLI shims carry a
+  // Probe 0 that prefers the bundled Node CLI (dist/cli_<name>.js); they must
+  // stay identical modulo the command name + that dist entry name.
+  // agent-coherence-migrate-deny has NO Node port (G6 deferred) — it must be
+  // the canonical shim minus the Probe 0 block, nothing else.
   const canonical = readFileSync(join(BIN_DIR, "agent-coherence-status"), "utf-8");
-  for (const sibling of ["agent-coherence-track", "agent-coherence-untrack", "agent-coherence-migrate-deny"]) {
+  const cliEntry: Record<string, string> = {
+    "agent-coherence-track": "cli_track.js",
+    "agent-coherence-untrack": "cli_untrack.js",
+  };
+  for (const [sibling, entry] of Object.entries(cliEntry)) {
     const content = readFileSync(join(BIN_DIR, sibling), "utf-8");
-    const normalized = content.replaceAll(sibling, "agent-coherence-status");
+    const normalized = content.replaceAll(sibling, "agent-coherence-status").replaceAll(entry, "cli_status.js");
     assert.strictEqual(
       normalized,
       canonical,
-      `${sibling} differs from agent-coherence-status by more than the NAME substring — drift introduced`,
+      `${sibling} differs from agent-coherence-status by more than NAME/entry — drift introduced`,
     );
   }
+  // migrate-deny = canonical minus the Probe 0 block.
+  const probe0 = /\n# Probe 0 \(zero-Python Unit 5\)[\s\S]*?\nfi\n/;
+  assert.match(canonical, probe0, "canonical shim must carry the Probe 0 block");
+  const canonicalSansProbe0 = canonical.replace(probe0, "");
+  const migrateDeny = readFileSync(join(BIN_DIR, "agent-coherence-migrate-deny"), "utf-8");
+  const normalizedMd = migrateDeny.replaceAll("agent-coherence-migrate-deny", "agent-coherence-status");
+  assert.strictEqual(
+    normalizedMd,
+    canonicalSansProbe0,
+    "agent-coherence-migrate-deny should equal the canonical shim minus Probe 0 — drift introduced",
+  );
 });
 
 test("bin shim: all 4 shims are present and executable", () => {

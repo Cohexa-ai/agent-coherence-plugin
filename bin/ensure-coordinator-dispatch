@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+# agent-coherence plugin: backend-aware SessionStart dispatcher (zero-Python
+# Unit 5 — the seam bin/ensure-coordinator-node's header has referenced since
+# Unit 1, landed only now that Node strict mode exists per plan decision C:
+# `coordinator_backend = node` must never select a warn-only Node build).
+#
+# Backend resolution (first hit wins; default preserves existing installs):
+#   1. $COHERENCE_COORDINATOR_BACKEND env — test/CI override.
+#   2. `<workspace-root>/.coherence/coordinator_backend` file — one line,
+#      `node` or `python`. Sibling to tracked.yaml / strict_mode.yaml; this
+#      IS the storage for the README's `coherence.coordinator_backend`
+#      plugin setting (defined here — no prior mechanism existed).
+#   3. Default: `python` (the v0.1.1/v0.2 behavior, unchanged).
+#
+# Workspace root mirrors the hook-client's resolution: git common-dir (linked
+# worktrees resolve to the parent repo) else toplevel. Not a git repo → the
+# Python bootstrap degrades gracefully on its own.
+
+set -uo pipefail
+
+self_dir="$(cd "$(dirname "$0")" 2>/dev/null && pwd -P)"
+
+backend="${COHERENCE_COORDINATOR_BACKEND:-}"
+if [ -z "$backend" ]; then
+  root=""
+  if command -v git >/dev/null 2>&1; then
+    common="$(git rev-parse --git-common-dir 2>/dev/null || true)"
+    case "$common" in
+      /*) root="$(dirname "$common")" ;;
+      "") root="" ;;
+      *) root="$(git rev-parse --show-toplevel 2>/dev/null || true)" ;;
+    esac
+  fi
+  if [ -n "$root" ] && [ -f "$root/.coherence/coordinator_backend" ]; then
+    backend="$(head -1 "$root/.coherence/coordinator_backend" | tr -d '[:space:]')"
+  fi
+fi
+
+case "$backend" in
+  node)
+    exec "$self_dir/ensure-coordinator-node"
+    ;;
+  *)
+    # python (explicit or default) — the existing bootstrap.
+    exec "$self_dir/ensure-coordinator"
+    ;;
+esac

@@ -26,6 +26,16 @@ NAME="agent-coherence-status"
 # recurse). `pwd -P` resolves symlinks so the comparison is robust.
 self_dir="$(cd "$(dirname "$0")" 2>/dev/null && pwd -P)"
 
+# Probe 0 (zero-Python Unit 5): prefer the plugin's bundled Node CLI — it
+# uses only node: builtins (no node_modules, no pip) and is backend-agnostic
+# (talks to whichever coordinator holds .coherence/server.pid). The Python
+# console-script probes below remain as the no-node fallback.
+plugin_root="${CLAUDE_PLUGIN_ROOT:-$(dirname "$self_dir")}"
+node_cli="${plugin_root}/dist/cli_status.js"
+if command -v node >/dev/null 2>&1 && [ -f "$node_cli" ]; then
+  exec node "$node_cli" "$@"
+fi
+
 # Probe 1: iterate PATH, exec the first candidate that isn't ourselves.
 # Covers the common case where the operator activated the venv before
 # launching claude (or pip-installed agent-coherence globally).
