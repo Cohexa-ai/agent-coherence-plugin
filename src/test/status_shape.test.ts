@@ -21,13 +21,13 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { createServer } from "../server.js";
 import { ArtifactRegistry } from "../registry.js";
-import { TrackedArtifactPolicy } from "../policy.js";
+import { PolicyRef } from "../policy.js";
 import { SessionRegistry } from "../sessions.js";
 
 function makeOptions() {
   const tmp = mkdtempSync(join(tmpdir(), "ac03-test-"));
   const registry = new ArtifactRegistry(join(tmp, "state.db"));
-  const policy = TrackedArtifactPolicy.load(tmp);
+  const policy = PolicyRef.load(tmp);
   const sessions = new SessionRegistry();
   const cleanup = (): void => {
     registry.close();

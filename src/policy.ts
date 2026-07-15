@@ -164,6 +164,11 @@ export class PolicyRef {
     return this.current.isTracked(parentRelativePath);
   }
 
+  /** Convenience passthrough for the /status default tier. */
+  summary(): PolicySummary {
+    return this.current.summary();
+  }
+
   /** Re-parse the YAML files and swap the snapshot (Python's `coordinator.policy = load(...)`). */
   reload(): void {
     this.current = TrackedArtifactPolicy.load(this.current.coordinatorRoot);

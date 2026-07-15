@@ -9,12 +9,17 @@
  */
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { ArtifactRegistry } from "../registry.js";
-import type { TrackedArtifactPolicy } from "../policy.js";
+import type { PolicyRef } from "../policy.js";
 import type { SessionRegistry } from "../sessions.js";
 
 export interface HookDeps {
   registry: ArtifactRegistry;
-  policy: TrackedArtifactPolicy;
+  /**
+   * Mutable policy holder (zero-Python Unit 1/2): handlers must read the
+   * policy THROUGH this ref (`deps.policy.isTracked(...)`) so a
+   * /policy/track|untrack reload is visible without a restart.
+   */
+  policy: PolicyRef;
   sessions: SessionRegistry;
 }
 
