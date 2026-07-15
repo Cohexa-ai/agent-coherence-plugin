@@ -4,13 +4,13 @@ All notable changes to the `agent-coherence` Claude Code plugin are documented h
 
 Alpha — APIs and the `hooks.json` wire shape may change before `v1.0`.
 
-The canonical release-notes surface is [GitHub Releases](https://github.com/hipvlady/agent-coherence-plugin/releases); this file mirrors that history in a structured format for operators who prefer a single browsable timeline.
+The canonical release-notes surface is [GitHub Releases](https://github.com/Cohexa-ai/agent-coherence-plugin/releases); this file mirrors that history in a structured format for operators who prefer a single browsable timeline.
 
 ## [Unreleased]
 
 ### Fixed
 
-- **Cross-runtime migration-ledger collision on the shared `state.db` ([#55](https://github.com/hipvlady/agent-coherence-plugin/issues/55)).** The Node coordinator now fails closed when it opens a `state.db` written under the sibling Python coordinator's ledger, instead of running its own v3 migration on it (which added `agent_states.deadline_tick` and stamped `user_version=3`, after which the Python coordinator refused to reopen its own store). Detection mirrors the Python guard: a foreign `registry_meta.schema_runtime` stamp, the Python-only `artifact_versions` table, or the Python `artifacts.owner_generation` fence column raise a typed `CrossRuntimeSchemaError` (`reason = "cross_runtime_schema"`) before any migration runs. Node now stamps `registry_meta.schema_runtime = "node"` on create and back-fills it on migrate, so detection is symmetric from both sides. `user_version == 1` remains indistinguishable by design (the Node v1 schema mirrors Python v1 byte-for-byte).
+- **Cross-runtime migration-ledger collision on the shared `state.db` ([#55](https://github.com/Cohexa-ai/agent-coherence-plugin/issues/55)).** The Node coordinator now fails closed when it opens a `state.db` written under the sibling Python coordinator's ledger, instead of running its own v3 migration on it (which added `agent_states.deadline_tick` and stamped `user_version=3`, after which the Python coordinator refused to reopen its own store). Detection mirrors the Python guard: a foreign `registry_meta.schema_runtime` stamp, the Python-only `artifact_versions` table, or the Python `artifacts.owner_generation` fence column raise a typed `CrossRuntimeSchemaError` (`reason = "cross_runtime_schema"`) before any migration runs. Node now stamps `registry_meta.schema_runtime = "node"` on create and back-fills it on migrate, so detection is symmetric from both sides. `user_version == 1` remains indistinguishable by design (the Node v1 schema mirrors Python v1 byte-for-byte).
 
 ### Changed
 
@@ -34,16 +34,16 @@ The canonical release-notes surface is [GitHub Releases](https://github.com/hipv
 
 ### Added
 
-- **PATH-resolver `bin/` shims** for the operator-facing console scripts (`agent-coherence-status`, `-track`, `-untrack`, `-migrate-deny`, `ensure-coordinator`), so bare invocations resolve even when the project virtualenv isn't active in the operator's shell. ([#43](https://github.com/hipvlady/agent-coherence-plugin/pull/43))
+- **PATH-resolver `bin/` shims** for the operator-facing console scripts (`agent-coherence-status`, `-track`, `-untrack`, `-migrate-deny`, `ensure-coordinator`), so bare invocations resolve even when the project virtualenv isn't active in the operator's shell. ([#43](https://github.com/Cohexa-ai/agent-coherence-plugin/pull/43))
 
 ### Documentation
 
-- README allowlist troubleshooting for the per-command permission prompts on the console scripts. ([#42](https://github.com/hipvlady/agent-coherence-plugin/pull/42))
+- README allowlist troubleshooting for the per-command permission prompts on the console scripts. ([#42](https://github.com/Cohexa-ai/agent-coherence-plugin/pull/42))
 - Bug 8 troubleshooting now points at the filed upstream issue (anthropics/claude-code#62616).
 
 ### Licensing
 
-- Added the Apache-2.0 `LICENSE` file to back the manifest's license declaration. ([#30](https://github.com/hipvlady/agent-coherence-plugin/pull/30), [#31](https://github.com/hipvlady/agent-coherence-plugin/pull/31))
+- Added the Apache-2.0 `LICENSE` file to back the manifest's license declaration. ([#30](https://github.com/Cohexa-ai/agent-coherence-plugin/pull/30), [#31](https://github.com/Cohexa-ai/agent-coherence-plugin/pull/31))
 
 ## [0.2.0] — 2026-05-24 (broad-beta launch)
 
@@ -61,7 +61,7 @@ The canonical release-notes surface is [GitHub Releases](https://github.com/hipv
 
 - **README depth-parity overhaul** (149 → 335 lines) following the EveryInc/compound-engineering-plugin section sequence: Philosophy + Quick Example + expanded Commands table + Strict Mode + Architecture + Local Development + FAQ + About Contributions. Plugin README is the broad-beta launch surface for first-time operators.
 - **`docs/BROAD_BETA.md`** — BB1-BB8 launch-readiness rubric (replaces the v0.1.1 G12 alpha-cohort hold), 14-day post-launch monitoring procedure, rollback runbook.
-- **Canonical un-pinned install** — `/plugin marketplace add hipvlady/agent-coherence-plugin` resolves to the latest published catalog tag. Pinned-version install (`@v0.2.0`) documented as the secondary path for operators who need version stability.
+- **Canonical un-pinned install** — `/plugin marketplace add Cohexa-ai/agent-coherence-plugin` resolves to the latest published catalog tag. Pinned-version install (`@v0.2.0`) documented as the secondary path for operators who need version stability.
 - **Public-feedback intake hardening** — 3 issue templates (bug / feature / install-troubleshooting), 4 seeded Discussion templates, `security@agent-coherence.dev` alias provisioned (closes the v0.1.1 SECURITY.md `TODO (v0.2)` item), CODE_OF_CONDUCT.md (Contributor Covenant 2.1), CONTRIBUTING.md (maintainer-curated PR posture, 72h triage SLA on bugs), PRIVACY.md (explicit no-telemetry).
 - **`CHANGELOG.md` at repo root** (this file) — Keep-a-Changelog format, mirrors GitHub Releases for operators who want a single browsable timeline.
 
@@ -84,7 +84,7 @@ See the README [v0.2 known limitations](README.md#v02-known-limitations) table f
 
 ## [0.1.1] — 2026-05-23
 
-**Marketplace cohort listing.** Promotes the v0.1.0-alpha.1 private alpha to a publicly-installable marketplace catalog entry. Single-command install via `/plugin marketplace add hipvlady/agent-coherence-plugin@v0.1.1` + `/plugin install agent-coherence@agent-coherence`. Ships with full 78-finding ce-review remediation pass against the library.
+**Marketplace cohort listing.** Promotes the v0.1.0-alpha.1 private alpha to a publicly-installable marketplace catalog entry. Single-command install via `/plugin marketplace add Cohexa-ai/agent-coherence-plugin@v0.1.1` + `/plugin install agent-coherence@agent-coherence`. Ships with full 78-finding ce-review remediation pass against the library.
 
 ### Added — Node MESI-subset coordinator
 
@@ -107,7 +107,7 @@ See the README [v0.2 known limitations](README.md#v02-known-limitations) table f
 
 ### Plugin coexistence
 
-- `package.json` is `"private": true` by design. Distribution is via the Claude Code marketplace catalog, not npm. The plugin is consumed via `/plugin marketplace add hipvlady/agent-coherence-plugin@v0.1.1`, which clones the tagged Git ref directly.
+- `package.json` is `"private": true` by design. Distribution is via the Claude Code marketplace catalog, not npm. The plugin is consumed via `/plugin marketplace add Cohexa-ai/agent-coherence-plugin@v0.1.1`, which clones the tagged Git ref directly.
 
 ## [0.1.0-alpha.1] — 2026-05-18
 

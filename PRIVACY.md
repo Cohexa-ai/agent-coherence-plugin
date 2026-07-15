@@ -9,7 +9,7 @@
 - **No error reporting service.** Errors land in your local `.coherence/` logs and (if a crash happens) the Claude Code session's normal log surface. Nothing is sent to Sentry / Bugsnag / Rollbar / any external telemetry collector.
 - **No third-party tracking.** No analytics SDKs are bundled. No CDN-loaded resources. No fingerprinting.
 
-If you ever observe an outbound network request originating from the plugin or the spawned coordinator, **that's a bug** — please report it via `security@agent-coherence.dev` or the [GitHub security tab](https://github.com/hipvlady/agent-coherence-plugin/security).
+If you ever observe an outbound network request originating from the plugin or the spawned coordinator, **that's a bug** — please report it via `security@agent-coherence.dev` or the [GitHub security tab](https://github.com/Cohexa-ai/agent-coherence-plugin/security).
 
 ## What the plugin DOES touch (all local)
 

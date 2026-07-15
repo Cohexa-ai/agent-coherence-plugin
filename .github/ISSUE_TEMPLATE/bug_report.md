@@ -64,4 +64,4 @@ claude --include-hook-events --output-format stream-json "<your prompt>"
 
 **Triage SLA**
 
-Bug reports are triaged within 72h (see [CONTRIBUTING.md](../../CONTRIBUTING.md)). P0 issues (data-corrupting, auth-bypassing) get a patch target of 7 days. If your bug is security-sensitive, please report it via the [security tab](https://github.com/hipvlady/agent-coherence-plugin/security) or `security@agent-coherence.dev` instead of a public Issue.
+Bug reports are triaged within 72h (see [CONTRIBUTING.md](../../CONTRIBUTING.md)). P0 issues (data-corrupting, auth-bypassing) get a patch target of 7 days. If your bug is security-sensitive, please report it via the [security tab](https://github.com/Cohexa-ai/agent-coherence-plugin/security) or `security@agent-coherence.dev` instead of a public Issue.

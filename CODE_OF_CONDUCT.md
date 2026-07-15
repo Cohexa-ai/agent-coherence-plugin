@@ -10,7 +10,7 @@ Applies to all project spaces: Issues, Discussions, Pull Requests, the project S
 
 Reports go to `security@agent-coherence.dev`. Reports are private — the maintainer reviews and responds within 72 hours. Confidential reporters are not identified in any public response.
 
-The reporting alias is the same as the security-vulnerability channel ([SECURITY.md](SECURITY.md)) because both surfaces converge on the same maintainer inbox. Use the GitHub [security tab's private vulnerability report](https://github.com/hipvlady/agent-coherence-plugin/security) if you prefer a GitHub-native channel.
+The reporting alias is the same as the security-vulnerability channel ([SECURITY.md](SECURITY.md)) because both surfaces converge on the same maintainer inbox. Use the GitHub [security tab's private vulnerability report](https://github.com/Cohexa-ai/agent-coherence-plugin/security) if you prefer a GitHub-native channel.
 
 ## Enforcement
 
