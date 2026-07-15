@@ -62,6 +62,25 @@ export interface Artifact {
   readonly updated_at: number;
 }
 
+/**
+ * Typed CAS result — Node mirror of Python's `ConflictDetail` / `CasCorruption`
+ * / WIN-tuple discrimination (core/types.py). Returned (never thrown) so the
+ * route layer maps each outcome to its exact Python wire body:
+ * - win        → `{ok: true, version}`
+ * - conflict   → `{ok: false, reason, current_version}` (reason matched
+ *                EXACTLY by consumers — typed-signal discipline, never substring)
+ * - corruption → the service-level `commit_cas_corruption …` error body
+ *                (`expected_version > current`; no current_version on the wire)
+ */
+export type CasOutcome =
+  | { kind: "win"; artifact: Artifact; invalidatedPeers: string[] }
+  | {
+      kind: "conflict";
+      reason: "version_mismatch" | "other_holder";
+      currentVersion: number;
+    }
+  | { kind: "corruption"; currentVersion: number };
+
 // ArtifactRow / rowToArtifact removed (ce-review maintainability finding):
 // the SQLite row shape and the Artifact interface were byte-identical;
 // the mapper was an identity function. We cast directly to `Artifact` at
@@ -423,6 +442,165 @@ export class ArtifactRegistry {
       }
       throw err;
     }
+  }
+
+  /**
+   * Optimistic-concurrency compare-and-swap commit. Node port of Python
+   * `sqlite_registry.commit_cas` + the service-layer D4 preconditions
+   * (`service._commit_cas_impl`), collapsed into one registry method per the
+   * KTD-10 pattern (no separate service layer on Node).
+   *
+   * Discrimination order mirrors Python's wire outcome exactly:
+   * 1. artifact missing → throw (route maps to an error body)
+   * 2. caller in M/E → throw `commit_cas_not_allowed … occ_is_shared_or_invalid_only`
+   *    (the D4 precondition: an acquired pessimistic writer must use commit()).
+   *    SHARED **and INVALID** callers are admitted — same as Python.
+   * 3. expected_version > current → `corruption` (no mutation) — the service
+   *    wraps this as a verbose CoherenceError; the route mirrors that body.
+   * 4. expected_version < current → `version_mismatch` (no mutation)
+   * 5. version matches, another agent holds M/E → `other_holder` (no mutation)
+   * 6. WIN: version+1, content_hash/last_writer_id/updated_at updated
+   *    (size_tokens preserved on null), committer S/I → SHARED (an OCC writer
+   *    never acquired a grant, so SHARED is the honest end-state and keeps a
+   *    repeat commit_cas eligible), every non-INVALID peer → INVALID + a
+   *    pending notice, single-writer re-checked.
+   *
+   * Parity notes (plan §Review corrections, decision A):
+   * - `caller_in_transient_state` is STRUCTURALLY UNREACHABLE on Node: the
+   *   MESI subset has no transient states (invalidation is instantaneous), so
+   *   the mid-transient window the Python precondition guards cannot exist.
+   * - `stale_read_generation` is STRUCTURALLY UNREACHABLE on Node: the Node
+   *   schema has no read_generation/owner_generation columns — those are
+   *   foreign-Python-ledger markers that the cross-runtime migration guard
+   *   fails closed on (migrations.ts), so a fence claim can never be present
+   *   in a Node-owned state.db.
+   */
+  commitCas(
+    artifactId: string,
+    agentId: string,
+    expectedVersion: number,
+    newContentHash: string,
+    nowTick: number,
+    sizeTokens: number | null = null,
+  ): CasOutcome {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const artifactRow = this.db
+        .prepare(`SELECT version FROM artifacts WHERE id = ?`)
+        .get(artifactId) as { version: number } | undefined;
+      if (artifactRow === undefined) {
+        throw new Error(`commitCas: artifact ${artifactId} not registered`);
+      }
+      const current = artifactRow.version;
+
+      // D4 precondition (Python service layer): an EXCLUSIVE/MODIFIED holder
+      // is a pessimistic writer and must use commit(). Checked before the
+      // version discrimination to match Python's wire outcome for an M/E
+      // caller with a mismatched version.
+      const callerState = this.getAgentState(artifactId, agentId);
+      if (callerState === MESIState.EXCLUSIVE || callerState === MESIState.MODIFIED) {
+        throw new Error(
+          `commit_cas_not_allowed agent=${agentId} artifact=${artifactId} ` +
+            `state=${callerState} reason=occ_is_shared_or_invalid_only ` +
+            `(use commit() for an EXCLUSIVE/MODIFIED holder)`,
+        );
+      }
+
+      if (expectedVersion > current) {
+        this.db.exec("COMMIT");
+        return { kind: "corruption", currentVersion: current };
+      }
+      if (expectedVersion < current) {
+        this.db.exec("COMMIT");
+        return { kind: "conflict", reason: "version_mismatch", currentVersion: current };
+      }
+      // Version matches. A *pessimistic* M/E peer blocks the OCC win.
+      const otherHolder = this.db
+        .prepare(
+          `SELECT 1 FROM agent_states
+           WHERE artifact_id = ? AND agent_id != ? AND state IN (?, ?)
+           LIMIT 1`,
+        )
+        .get(artifactId, agentId, MESIState.MODIFIED, MESIState.EXCLUSIVE);
+      if (otherHolder !== undefined) {
+        this.db.exec("COMMIT");
+        return { kind: "conflict", reason: "other_holder", currentVersion: current };
+      }
+
+      // ---- WIN: mutate atomically ----
+      const nextVersion = current + 1;
+      checkMonotonicVersion(current, nextVersion);
+      this.db
+        .prepare(
+          `UPDATE artifacts
+             SET version = ?, content_hash = ?, size_tokens = COALESCE(?, size_tokens),
+                 last_writer_id = ?, updated_at = ?
+           WHERE id = ?`,
+        )
+        .run(nextVersion, newContentHash, sizeTokens, agentId, Date.now() / 1000, artifactId);
+
+      // Invalidate every non-INVALID peer (SHARED readers; M/E was excluded
+      // above) + queue a preemption notice — same shape as commit().
+      const stateMap = this.getStateMap(artifactId);
+      const invalidatedPeers: string[] = [];
+      for (const [peerId, peerState] of stateMap) {
+        if (peerId === agentId) continue;
+        if (peerState === MESIState.INVALID) continue;
+        if (!isValidTransition(peerState, MESIState.INVALID)) {
+          throw new Error(`commitCas: peer ${peerId} in ${peerState} cannot transition to INVALID`);
+        }
+        this.setAgentStateInternal(artifactId, peerId, peerState, MESIState.INVALID, nowTick, "commit_cas");
+        this.upsertPendingNotice(peerId, artifactId, agentId, nowTick);
+        invalidatedPeers.push(peerId);
+      }
+
+      // Committer ends SHARED (S no-op; I/absent → SHARED).
+      const committerState = callerState ?? MESIState.INVALID;
+      if (committerState !== MESIState.SHARED) {
+        if (!isValidTransition(committerState, MESIState.SHARED)) {
+          throw new Error(
+            `commitCas: ${agentId} transition ${committerState}→SHARED not allowed`,
+          );
+        }
+        this.setAgentStateInternal(artifactId, agentId, committerState, MESIState.SHARED, nowTick, "commit_cas");
+      }
+
+      const postMap = this.getStateMap(artifactId);
+      checkSingleWriter(postMap);
+
+      const updatedRow = this.db
+        .prepare(
+          `SELECT id, name, version, content_hash, size_tokens, last_writer_id, updated_at FROM artifacts WHERE id = ?`,
+        )
+        .get(artifactId) as Artifact;
+
+      this.db.exec("COMMIT");
+      return { kind: "win", artifact: updatedRow, invalidatedPeers };
+    } catch (err) {
+      try {
+        this.db.exec("ROLLBACK");
+      } catch {
+        // Rollback failure non-recoverable; surface original error.
+      }
+      throw err;
+    }
+  }
+
+  /**
+   * Return the names of all registry-known artifacts whose name starts with
+   * `prefix` (empty prefix = all). Used by /hooks/pre-grep to enumerate the
+   * tracked artifacts under a search root. Mirrors Python
+   * `sqlite_registry.artifact_names_under_prefix`.
+   *
+   * The LIKE pattern escapes `%`, `_`, and the escape char itself so a
+   * literal prefix like `docs_v2/` cannot wildcard-match `docsXv2/`.
+   */
+  artifactNamesUnderPrefix(prefix: string): string[] {
+    const escaped = prefix.replace(/([\\%_])/g, "\\$1");
+    const rows = this.db
+      .prepare(`SELECT name FROM artifacts WHERE name LIKE ? ESCAPE '\\' ORDER BY name`)
+      .all(`${escaped}%`) as { name: string }[];
+    return rows.map((r) => r.name);
   }
 
   /**

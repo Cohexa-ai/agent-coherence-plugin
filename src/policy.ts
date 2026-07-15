@@ -22,9 +22,14 @@
  * fnmatch's fnmatchcase semantics; KTD-B.3 C5 prefix contract applies to
  * the parity scenarios that cover policy decisions.
  */
-import { readFileSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { readFileSync, statSync, writeFileSync, renameSync, mkdirSync } from "node:fs";
+import { join, dirname } from "node:path";
 import { load as yamlLoad } from "js-yaml";
+
+/** Mirror of Python coordinator_server.MAX_POLICY_PATHS_PER_REQUEST. */
+export const MAX_POLICY_PATHS_PER_REQUEST = 20;
+/** Mirror of Python coordinator_server.MAX_POLICY_YAML_BYTES. */
+export const MAX_POLICY_YAML_BYTES = 64 * 1024;
 
 /**
  * Default tracked patterns (Unit 2 commit 4 + KTD-L).
@@ -123,6 +128,134 @@ export class TrackedArtifactPolicy {
       rejected_pattern_count: this.rejectedPatterns.length,
     };
   }
+}
+
+/**
+ * Mutable policy holder — the seam that makes /policy/track + /policy/untrack
+ * live-reloadable (plan Unit 1, "the load-bearing decision for G3").
+ *
+ * `createServer` captures its deps once by reference; Python re-assigns
+ * `coordinator.policy = TrackedArtifactPolicy.load(root)` after every YAML
+ * append. Node handlers must therefore read the policy THROUGH this ref
+ * (never bind the inner TrackedArtifactPolicy), so a `reload()` after an
+ * append is immediately visible to live handlers with no restart.
+ *
+ * Node's single-threaded synchronous handler model means a reload cannot
+ * interleave a handler mid-decision — the swap is atomic by construction.
+ */
+export class PolicyRef {
+  private current: TrackedArtifactPolicy;
+
+  constructor(policy: TrackedArtifactPolicy) {
+    this.current = policy;
+  }
+
+  static load(coordinatorRoot: string): PolicyRef {
+    return new PolicyRef(TrackedArtifactPolicy.load(coordinatorRoot));
+  }
+
+  /** The current immutable policy snapshot. Do NOT cache across requests. */
+  get(): TrackedArtifactPolicy {
+    return this.current;
+  }
+
+  /** Convenience passthrough — the hot-path call every hook handler makes. */
+  isTracked(parentRelativePath: string): boolean {
+    return this.current.isTracked(parentRelativePath);
+  }
+
+  /** Re-parse the YAML files and swap the snapshot (Python's `coordinator.policy = load(...)`). */
+  reload(): void {
+    this.current = TrackedArtifactPolicy.load(this.current.coordinatorRoot);
+  }
+}
+
+/**
+ * Append valid patterns to a policy YAML (`tracked.yaml` / `ignored.yaml`).
+ * Node port of Python `_append_policy_yaml` (coordinator_server.py). Returns
+ * `{added, rejected}` with the exact Python semantics:
+ * - per-path validation (empty → "empty"; absolute → "absolute path";
+ *   `..` → "contains '..'") — defense-in-depth; routes pre-validate;
+ * - dedupe against patterns already in the file — a fully-duplicate request
+ *   returns `added: []`;
+ * - append `- <p>` lines preserving existing content;
+ * - byte cap → throws with Python's exact message
+ *   (`policy YAML cap of 65536 bytes would be exceeded`) → route maps to 400.
+ *
+ * Locking note (deliberate divergence from Python's fcntl.flock): all Node
+ * writes flow through the single coordinator process whose handlers are
+ * synchronous on one event loop, and the pid-file mutex guarantees one
+ * coordinator per workspace — so there is no concurrent writer to exclude.
+ * The write itself is tmp-file + atomic rename so a crash cannot leave a
+ * torn YAML.
+ */
+export function appendPolicyYaml(
+  yamlPath: string,
+  newPaths: ReadonlyArray<string>,
+): { added: string[]; rejected: Array<{ path: string; reason: string }> } {
+  mkdirSync(dirname(yamlPath), { recursive: true });
+
+  const candidate: string[] = [];
+  const rejected: Array<{ path: string; reason: string }> = [];
+  for (const p of newPaths) {
+    if (p === "") {
+      rejected.push({ path: p, reason: "empty" });
+      continue;
+    }
+    if (p.startsWith("/")) {
+      rejected.push({ path: p, reason: "absolute path" });
+      continue;
+    }
+    if (p.replace(/\\/g, "/").split("/").includes("..")) {
+      rejected.push({ path: p, reason: "contains '..'" });
+      continue;
+    }
+    candidate.push(p);
+  }
+  if (candidate.length === 0) {
+    return { added: [], rejected };
+  }
+
+  let existing = "";
+  try {
+    existing = readFileSync(yamlPath, "utf8");
+  } catch {
+    existing = "";
+  }
+  const alreadyPresent = parseYamlPatternLines(existing);
+  const trulyNew = candidate.filter((p) => !alreadyPresent.has(p));
+  if (trulyNew.length === 0) {
+    return { added: [], rejected };
+  }
+
+  const newLines = trulyNew.map((p) => `- ${p}`).join("\n");
+  const newContent =
+    existing !== ""
+      ? existing.replace(/\n+$/, "") + "\n" + newLines + "\n"
+      : newLines + "\n";
+  if (Buffer.byteLength(newContent, "utf8") > MAX_POLICY_YAML_BYTES) {
+    throw new Error(`policy YAML cap of ${MAX_POLICY_YAML_BYTES} bytes would be exceeded`);
+  }
+
+  const tmpPath = `${yamlPath}.tmp`;
+  writeFileSync(tmpPath, newContent, "utf8");
+  renameSync(tmpPath, yamlPath);
+  return { added: trulyNew, rejected };
+}
+
+/** Parse the pattern strings out of a policy YAML body (tolerant; mirrors Python `_parse_yaml_pattern_lines`). */
+function parseYamlPatternLines(text: string): Set<string> {
+  if (text === "") return new Set();
+  try {
+    const raw = yamlLoad(text);
+    if (Array.isArray(raw)) {
+      return new Set(raw.filter((x): x is string => typeof x === "string"));
+    }
+  } catch {
+    // Malformed YAML: fall through to the empty set — the append will
+    // still produce a parseable file (existing content preserved verbatim).
+  }
+  return new Set();
 }
 
 // ----------------------------------------------------------------------
