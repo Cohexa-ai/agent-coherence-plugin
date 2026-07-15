@@ -15,7 +15,12 @@
  */
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { MESIState } from "../states.js";
-import { preemptionNoticeText } from "../hook_payloads.js";
+import {
+  emitStrictDeny,
+  nowUnix,
+  preemptionNoticeText,
+  type StaleSummary,
+} from "../hook_payloads.js";
 import { detectTrackedPaths } from "./bash_path_detector.js";
 import {
   type HookDeps,
@@ -79,6 +84,10 @@ export async function handlePreBash(
   const now = nowTickFn();
 
   const staleSummaries: Array<{ path: string; current_version: number }> = [];
+  // v0.2 KTD-Q (Unit 6): first strict + stale path drives a deny on the
+  // whole command (multi-path commands re-deny with the next path's reason
+  // on retry, bounded by the model's own retry loop — mirrors Python).
+  let strictStaleFirst: StaleSummary | null = null;
   for (const path of trackedPaths) {
     const existing = deps.registry.getArtifactByName(path);
     if (existing === null) {
@@ -92,8 +101,37 @@ export async function handlePreBash(
       continue; // fresh on this path
     }
     staleSummaries.push({ path, current_version: existing.version });
-    // Re-grant SHARED to suppress repeat fires (warn-mode contract).
+    if (strictStaleFirst === null && deps.policy.isStrictMode(path)) {
+      const lastWriterSession =
+        existing.last_writer_id !== null
+          ? deps.sessions.agentIdToSessionId(existing.last_writer_id)
+          : null;
+      strictStaleFirst = {
+        path,
+        current_version: existing.version,
+        prior_version_seen_by_session:
+          agentState === MESIState.INVALID ? existing.version - 1 : null,
+        last_writer_session_id: lastWriterSession ?? "<unknown>",
+        last_writer_at_unix_ts: existing.updated_at,
+        warning_generated_at_unix_ts: nowUnix(),
+        hash_differs: false,
+      };
+    }
+    // Re-grant SHARED to suppress repeat fires (warn-mode contract; Python
+    // pre-bash re-grants even on the strict path — the deny fires this once).
     deps.registry.grantShared(existing.id, agentId, now, "post_stale_bash");
+  }
+
+  if (strictStaleFirst !== null) {
+    writeJson(res, 200, {
+      hookSpecificOutput: emitStrictDeny({
+        source: "pre_bash_strict_deny",
+        summary: strictStaleFirst,
+      }),
+      status: "stale",
+      stale_paths: staleSummaries.map((s) => s.path),
+    });
+    return;
   }
 
   const noticeText = drainNoticeText(deps, agentId);

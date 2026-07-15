@@ -72,6 +72,7 @@ export class TrackedArtifactPolicy {
   readonly trackedPatterns: ReadonlyArray<string>;
   readonly ignoredPatterns: ReadonlyArray<string>;
   readonly userAddedPatterns: ReadonlyArray<string>;
+  readonly strictModePaths: ReadonlyArray<string>;
   readonly rejectedPatterns: ReadonlyArray<RejectedPattern>;
 
   private constructor(args: {
@@ -79,27 +80,49 @@ export class TrackedArtifactPolicy {
     trackedPatterns: ReadonlyArray<string>;
     ignoredPatterns: ReadonlyArray<string>;
     userAddedPatterns: ReadonlyArray<string>;
+    strictModePaths: ReadonlyArray<string>;
     rejectedPatterns: ReadonlyArray<RejectedPattern>;
   }) {
     this.coordinatorRoot = args.coordinatorRoot;
     this.trackedPatterns = args.trackedPatterns;
     this.ignoredPatterns = args.ignoredPatterns;
     this.userAddedPatterns = args.userAddedPatterns;
+    this.strictModePaths = args.strictModePaths;
     this.rejectedPatterns = args.rejectedPatterns;
   }
 
-  /** Load policy: defaults + .coherence/tracked.yaml opt-in + .coherence/ignored.yaml opt-out. */
+  /**
+   * Load policy: defaults + .coherence/tracked.yaml opt-in +
+   * .coherence/ignored.yaml opt-out + .coherence/strict_mode.yaml
+   * strict opt-in (zero-Python Unit 6; mirrors Python policy.py).
+   */
   static load(coordinatorRoot: string): TrackedArtifactPolicy {
     const rejected: RejectedPattern[] = [];
     const added = loadYamlPatterns(join(coordinatorRoot, ".coherence", "tracked.yaml"), rejected);
     const ignored = loadYamlPatterns(join(coordinatorRoot, ".coherence", "ignored.yaml"), rejected);
+    const strict = loadYamlPatterns(join(coordinatorRoot, ".coherence", "strict_mode.yaml"), rejected);
     return new TrackedArtifactPolicy({
       coordinatorRoot,
       trackedPatterns: DEFAULT_TRACKED_PATTERNS,
       ignoredPatterns: ignored,
       userAddedPatterns: added,
+      strictModePaths: strict,
       rejectedPatterns: rejected,
     });
+  }
+
+  /**
+   * v0.2 KTD-O (Node port): a path is in strict mode iff it is TRACKED and
+   * matches at least one strict_mode_paths glob. Intersection semantics —
+   * strict never applies to untracked paths. Empty strict_mode_paths
+   * short-circuits to false (v0.1.1 warn-only behavior preserved).
+   */
+  isStrictMode(parentRelativePath: string): boolean {
+    if (this.strictModePaths.length === 0) return false;
+    if (!this.isTracked(parentRelativePath)) return false;
+    const normalized = normalizeRelative(parentRelativePath);
+    if (normalized === null) return false;
+    return this.strictModePaths.some((p) => globMatch(normalized.replace(/\\/g, "/"), p));
   }
 
   /**
@@ -162,6 +185,11 @@ export class PolicyRef {
   /** Convenience passthrough — the hot-path call every hook handler makes. */
   isTracked(parentRelativePath: string): boolean {
     return this.current.isTracked(parentRelativePath);
+  }
+
+  /** Strict-mode passthrough (Unit 6) — same read-through-the-ref discipline. */
+  isStrictMode(parentRelativePath: string): boolean {
+    return this.current.isStrictMode(parentRelativePath);
   }
 
   /** Convenience passthrough for the /status default tier. */

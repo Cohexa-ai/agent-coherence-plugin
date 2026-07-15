@@ -9,6 +9,7 @@
  */
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { MESIState } from "../states.js";
+import { emitStrictDeny, nowUnix, type StaleSummary } from "../hook_payloads.js";
 import { drainNoticeText } from "./pre_bash.js";
 import {
   type HookDeps,
@@ -55,13 +56,43 @@ export async function handlePreGrep(
   const now = nowTickFn();
 
   const staleSummaries: Array<{ path: string; current_version: number }> = [];
+  let strictStaleFirst: StaleSummary | null = null;
   for (const path of trackedPaths) {
     const existing = deps.registry.getArtifactByName(path);
     if (existing === null) continue; // no seeding on the grep path
     const agentState = deps.registry.getAgentState(existing.id, agentId);
     if (agentState !== null && agentState !== MESIState.INVALID) continue;
     staleSummaries.push({ path, current_version: existing.version });
+    if (strictStaleFirst === null && deps.policy.isStrictMode(path)) {
+      const lastWriterSession =
+        existing.last_writer_id !== null
+          ? deps.sessions.agentIdToSessionId(existing.last_writer_id)
+          : null;
+      strictStaleFirst = {
+        path,
+        current_version: existing.version,
+        prior_version_seen_by_session:
+          agentState === MESIState.INVALID ? existing.version - 1 : null,
+        last_writer_session_id: lastWriterSession ?? "<unknown>",
+        last_writer_at_unix_ts: existing.updated_at,
+        warning_generated_at_unix_ts: nowUnix(),
+        hash_differs: false,
+      };
+    }
     deps.registry.grantShared(existing.id, agentId, now, "post_stale_grep");
+  }
+
+  // v0.2 KTD-Q strict short-circuit — same shape as pre-bash (Unit 6).
+  if (strictStaleFirst !== null) {
+    writeJson(res, 200, {
+      hookSpecificOutput: emitStrictDeny({
+        source: "pre_grep_strict_deny",
+        summary: strictStaleFirst,
+      }),
+      status: "stale",
+      stale_paths: staleSummaries.map((s) => s.path),
+    });
+    return;
   }
 
   const noticeText = drainNoticeText(deps, agentId);
