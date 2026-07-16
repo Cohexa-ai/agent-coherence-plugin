@@ -21,8 +21,14 @@ const NAMESPACE_URL = "6ba7b811-9dad-11d1-80b4-00c04fd430c8";
  * Convert a Claude Code session_id to the deterministic agent_id (UUID hex,
  * 32 chars, no hyphens, lowercase) used for `agent_states.agent_id` rows.
  */
-export function sessionToAgentId(sessionId: string): string {
-  const name = `ccs-agent:claude-session-${sessionId}`;
+export function sessionToAgentId(sessionId: string, subagentId?: string | null): string {
+  // SB-25 composite identity: fold string mirrored byte-for-byte with
+  // Python session_to_agent_id — absent/empty subagentId ⇒ the original
+  // derivation, byte-identical (main-thread behavior unchanged).
+  const name =
+    subagentId != null && subagentId !== ""
+      ? `ccs-agent:claude-session-${sessionId}:subagent-${subagentId}`
+      : `ccs-agent:claude-session-${sessionId}`;
   // uuid v5 returns "xxxxxxxx-xxxx-..." (hyphenated). Strip + lowercase
   // to match Python's UUID.hex output exactly.
   return uuidv5(name, NAMESPACE_URL).replace(/-/g, "").toLowerCase();
