@@ -205,7 +205,7 @@ Two coordinator backends:
 mkdir -p .coherence && printf 'node\n' > .coherence/coordinator_backend
 ```
 
-The env var takes precedence; an unknown value falls back to `python`. (This file — not a Claude Code plugin setting — is the selection mechanism; the Node zero-Python guarantee is scoped to the platforms with a prebuilt `better-sqlite3` for the pinned Node ABI range, `engines.node` in `package.json`.)
+The env var takes precedence; an unknown value falls back to `python`. (This file — not a Claude Code plugin setting — is the selection mechanism; the Node zero-Python guarantee is scoped to the platforms with a prebuilt `better-sqlite3` for the pinned Node ABI range. The floor is **Node 20** — `better-sqlite3` dropped Node 18 — so `engines.node` is `>=20 <25`; on Node 18 the plugin still runs on the Python backend, or on Node with a local toolchain to compile `better-sqlite3`.)
 
 Both backends speak the same HTTP wire contract; the [`tests/protocol_corpus/`](https://github.com/hipvlady/agent-coherence/tree/main/tests/protocol_corpus) suite in the library repo catches drift. Switch backends safely via `agent-coherence-coordinator --prepare-for-migration`. The canonical design lives in the library's `docs/plans/` directory.
 

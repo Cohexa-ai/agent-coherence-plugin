@@ -259,8 +259,24 @@ test(
         } as NodeJS.ProcessEnv,
       });
       assert.equal(r.status, 0, `install-time bootstrap failed:\n${r.stdout}\n${r.stderr}`);
+      // ensure-coordinator-node Stage 4 spawns a DETACHED `nohup` coordinator
+      // daemon that keeps writing into the workspace/plugin-data dirs. It must
+      // be stopped before cleanup — otherwise rmSync races the live daemon
+      // (ENOTEMPTY, seen on CI) AND the process leaks on the runner. The pid is
+      // in the bootstrap's stderr, available immediately (the pid FILE is
+      // written asynchronously by the daemon and may not exist yet).
+      const spawned = /spawned Node coordinator \(pid=(\d+)/.exec(r.stderr ?? "");
+      if (spawned) {
+        try {
+          process.kill(Number(spawned[1]), "SIGKILL");
+        } catch {
+          // already exited
+        }
+      }
     } finally {
-      rmSync(root, { recursive: true, force: true });
+      // maxRetries absorbs the brief window between SIGKILL and the OS
+      // releasing the daemon's open SQLite/WAL/log handles.
+      rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
     }
   },
 );
