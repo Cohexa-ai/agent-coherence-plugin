@@ -74,7 +74,7 @@
     ],
     "SubagentStop": [
       {
-        "_comment": "SB-25 Unit 4: release the SUBAGENT identity's uncommitted grants when it stops (the heartbeat/idle sweep is the missed-stop backstop). The subcommand requires the payload's agent_id - absent means no-op {}, never a parent release.",
+        "_comment": "SB-25 Unit 4: release the SUBAGENT identity's uncommitted grants when it stops. The subcommand requires the payload's agent_id (validated against the subagent-id charset) - absent OR malformed means no-op {}, never a parent release. Backstop: the Python coordinator's heartbeat/idle sweep reclaims a grant if SubagentStop is missed; the Node coordinator has no sweep yet, so on the Node backend a missed SubagentStop holds the grant until coordinator restart (tracked follow-up).",
         "hooks": [
           {
             "type": "command",

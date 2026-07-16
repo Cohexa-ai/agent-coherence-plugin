@@ -28,7 +28,13 @@ const READER_COMMANDS = new Set([
 const WRAPPER_COMMANDS = new Set(["eval", "command", "exec", "builtin"]);
 const EVAL_INTERPRETERS = new Set(["python", "python3", "perl", "ruby"]);
 /** `name.ext`-shaped tokens inside interpreter eval bodies (parity with Python's scan). */
-const PATHLIKE_RE = /[A-Za-z0-9_./-]+\.[A-Za-z0-9]+/g;
+// The leading negative-lookbehind is load-bearing, not cosmetic: it mirrors
+// Python's `_PATH_TOKEN_RE` and prevents the engine from re-attempting a match
+// at every offset inside a long run of path characters. Without it, a 16 KB
+// dot-free command (within MAX_COMMAND_LENGTH) drives near-quadratic
+// backtracking that blocks the single-threaded coordinator's event loop for
+// every session in the workspace (ReDoS). See security review 2026-07-16.
+const PATHLIKE_RE = /(?<![A-Za-z0-9_/.\-])[A-Za-z0-9_./-]+\.[A-Za-z0-9]+/g;
 const ENV_ASSIGN_RE = /^[A-Za-z_][A-Za-z0-9_]*=/;
 
 /** Quote-aware tokenizer (shlex-lite): honors '...'/"..." grouping + backslash escapes. */

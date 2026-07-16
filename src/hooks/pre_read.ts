@@ -129,8 +129,14 @@ export async function handlePreRead(
         existingArtifact.last_writer_id !== null
           ? deps.sessions.agentIdToSessionId(existingArtifact.last_writer_id)
           : null;
+      // P1: compare the raw writer identity against THIS caller's composite
+      // agentId — NOT agentIdToSessionId(...) vs the parent session_id. Since
+      // SB-25 made the reverse lookup return a subagent's bare attribution id,
+      // the old session-string comparison could never match for a subagent's
+      // own commit, so its immediate self-re-read was wrongly denied as a
+      // "foreign edit." (lastWriterSession is kept only for the summary field.)
       const isSelfCommitLag =
-        lastWriterSession === sessionId &&
+        existingArtifact.last_writer_id === agentId &&
         now - existingArtifact.updated_at <= SHARED_FOREIGN_DENY_LAG_WINDOW_SEC;
       if (!isSelfCommitLag) {
         const sharedSummary: StaleSummary = {

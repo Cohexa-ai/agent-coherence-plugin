@@ -306,3 +306,32 @@ test("SHARED-hash arm: foreign out-of-band edit denies; recent self-commit lag s
     await cleanup();
   }
 });
+
+test("SHARED-hash arm: a SUBAGENT's own recent commit is suppressed, not denied (self-commit-lag identity fix)", async () => {
+  const { registry, sessions, post, cleanup } = await makeStrictServer(["CLAUDE.md"]);
+  try {
+    const id = registry.resolveOrRegisterArtifact("CLAUDE.md", HASH_1);
+    const SUB = "a0826622451ec196f";
+    // A SUBAGENT (composite identity) holds SHARED after its own commit_cas WIN.
+    const agentSub = sessions.registerSession(SID_B, SUB);
+    registry.grantShared(id, agentSub, 40);
+    const win = registry.commitCas(id, agentSub, 1, HASH_2, 41);
+    assert.equal(win.kind, "win");
+    // The subagent re-reads with stale disk bytes, carrying its agent_id.
+    // BEFORE the fix: agentIdToSessionId(composite) → the bare subagent id,
+    // which never equals the parent session_id → NOT suppressed → the
+    // subagent's own recent commit was wrongly DENIED as a foreign edit,
+    // naming the subagent itself. AFTER: last_writer_id === the caller's
+    // composite agentId → recognized as self-commit lag → suppressed.
+    const lag = await post("/hooks/pre-read", {
+      session_id: SID_B,
+      agent_id: SUB,
+      path: "CLAUDE.md",
+      content_hash: HASH_1,
+    });
+    assert.equal(lag.status, "fresh");
+    assert.equal(decision(lag), undefined);
+  } finally {
+    await cleanup();
+  }
+});

@@ -23,6 +23,9 @@ import { request } from "node:http";
 
 export class CoordinatorUnavailable extends Error {}
 
+/** Per-git-call wall-clock bound (mirrors the Python resolver's timeout=5.0). */
+const GIT_TIMEOUT_MS = 5000;
+
 export interface CoordinatorEndpoint {
   port: number;
   bearer: string;
@@ -37,6 +40,12 @@ export function findCoordinatorRoot(start?: string): string | null {
       cwd,
       encoding: "utf8",
       stdio: ["ignore", "pipe", "ignore"],
+      // P1: bound every git call (mirrors Python's subprocess timeout=5.0). A
+      // hung git (index.lock contention, stalled NFS) must NOT hang the
+      // hook-client forever — that would defeat the always-exit-0 fail-open
+      // contract on the critical path of every tool call. A timeout throws,
+      // which the catch below turns into a clean null → {} at runMain.
+      timeout: GIT_TIMEOUT_MS,
     }).trim();
   } catch {
     return null;
@@ -51,6 +60,7 @@ export function findCoordinatorRoot(start?: string): string | null {
       cwd,
       encoding: "utf8",
       stdio: ["ignore", "pipe", "ignore"],
+      timeout: GIT_TIMEOUT_MS,
     }).trim();
     return toplevel === "" ? null : resolve(toplevel);
   } catch {

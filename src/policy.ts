@@ -30,6 +30,33 @@ import { load as yamlLoad } from "js-yaml";
 export const MAX_POLICY_PATHS_PER_REQUEST = 20;
 /** Mirror of Python coordinator_server.MAX_POLICY_YAML_BYTES. */
 export const MAX_POLICY_YAML_BYTES = 64 * 1024;
+/** Mirror of Python coordinator_server.MAX_PATH_LEN. */
+export const MAX_POLICY_PATH_LEN = 1024;
+
+/**
+ * Authoritative server-side track/untrack path gate — a byte-for-byte port of
+ * Python `validate_path` (reason strings included; the corpus pins them).
+ *
+ * Two things this fixes vs the prior inline check: (1) it rejects control
+ * characters — the newline-injection vector that let `"a\n- /etc/passwd"`
+ * re-parse into extra YAML entries, bypassing the absolute/traversal/cap
+ * guards; (2) leading-backslash + a length cap. Returns the rejection reason,
+ * or null if the path is safe. Order of checks matches Python exactly so the
+ * `rejected[]` reason is identical on both backends.
+ */
+export function validatePolicyPath(path: string): string | null {
+  if (path === "") return "path is empty";
+  if (path.length > MAX_POLICY_PATH_LEN) return `path exceeds ${MAX_POLICY_PATH_LEN} chars`;
+  if (path.startsWith("/")) return "path must be relative (no leading /)";
+  if (path.startsWith("\\")) return "path must be relative (no leading \\)";
+  // ANY control char rejected — newline injection into YAML + terminal mischief.
+  for (const ch of path) {
+    const code = ch.codePointAt(0)!;
+    if (code < 0x20 || code === 0x7f) return "path contains control characters";
+  }
+  if (path.replace(/\\/g, "/").split("/").includes("..")) return "path contains '..' traversal";
+  return null;
+}
 
 /**
  * Default tracked patterns (Unit 2 commit 4 + KTD-L).
@@ -231,16 +258,9 @@ export function appendPolicyYaml(
   const candidate: string[] = [];
   const rejected: Array<{ path: string; reason: string }> = [];
   for (const p of newPaths) {
-    if (p === "") {
-      rejected.push({ path: p, reason: "empty" });
-      continue;
-    }
-    if (p.startsWith("/")) {
-      rejected.push({ path: p, reason: "absolute path" });
-      continue;
-    }
-    if (p.replace(/\\/g, "/").split("/").includes("..")) {
-      rejected.push({ path: p, reason: "contains '..'" });
+    const reason = validatePolicyPath(p);
+    if (reason !== null) {
+      rejected.push({ path: p, reason });
       continue;
     }
     candidate.push(p);

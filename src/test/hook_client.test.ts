@@ -242,7 +242,7 @@ test("end-to-end: pre-bash through the real client against a live coordinator", 
   }
 });
 
-test("buildSubagentStop: agent_id REQUIRED (absence must never release the parent)", async () => {
+test("buildSubagentStop: agent_id REQUIRED + shape-validated (malformed must never release the parent)", async () => {
   const { buildSubagentStop } = await import("../hook_client.js");
   assert.deepEqual(buildSubagentStop({ session_id: SID, agent_id: "sub-1" }), {
     session_id: SID,
@@ -252,5 +252,12 @@ test("buildSubagentStop: agent_id REQUIRED (absence must never release the paren
     session_id: SID,
     agent_id: "sub-2",
   });
+  // Absent → SkipHook (unchanged).
   assert.throws(() => buildSubagentStop({ session_id: SID }), SkipHook);
+  // P1: present-but-MALFORMED → SkipHook, NOT a forwarded body that the server
+  // would null and degrade to a parent-scoped release. Charset + length + the
+  // control-char/newline vector.
+  for (const bad of ["bad.id", "has space", "x".repeat(65), "trailing\n", "a/b", ":subagent-x"]) {
+    assert.throws(() => buildSubagentStop({ session_id: SID, agent_id: bad }), SkipHook, `expected SkipHook for ${JSON.stringify(bad)}`);
+  }
 });

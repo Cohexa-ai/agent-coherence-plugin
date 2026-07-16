@@ -23,11 +23,14 @@
  *   pre-grep     PreToolUse:Grep       → {session_id, search_root}
  *
  * SB-25 companion: when the CC payload carries a subagent `agent_id`, it is
- * threaded into the request body (additive; both coordinators currently
- * ignore it — the composite-identity derivation rides it later).
+ * threaded into the request body (additive). Both coordinators derive a
+ * composite `(session_id, agent_id)` identity from it so subagents are
+ * first-class coherence peers; an absent/malformed `agent_id` resolves to the
+ * parent identity (except on subagent-stop, which requires a valid one).
  */
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
+import { isValidSubagentId } from "./agent_id.js";
 import {
   CoordinatorUnavailable,
   findCoordinatorRoot,
@@ -157,8 +160,14 @@ export function buildSessionStop(cc: CcPayload): Record<string, unknown> {
 export function buildSubagentStop(cc: CcPayload): Record<string, unknown> {
   const sessionId = requireSessionId(cc);
   const aid = cc.agent_id !== undefined ? cc.agent_id : cc.agentId;
-  if (typeof aid !== "string" || aid === "") {
-    throw new SkipHook("agent_id missing for subagent-stop");
+  // P1 subagent-stop safety: reject a present-but-MALFORMED agent_id here
+  // (the same charset/length rule the server applies), not just an absent
+  // one. A non-empty invalid id would otherwise pass this guard, get nulled
+  // by the server's readSubagentId, and degrade to a PARENT session-stop —
+  // releasing the parent's live grants. Fail-open ({}) is correct: skipping
+  // a doomed release is strictly safer than performing the wrong one.
+  if (!isValidSubagentId(aid)) {
+    throw new SkipHook("agent_id missing or malformed for subagent-stop");
   }
   return { session_id: sessionId, agent_id: aid };
 }

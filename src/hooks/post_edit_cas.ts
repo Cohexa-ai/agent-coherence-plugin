@@ -115,7 +115,18 @@ export async function handlePostEditCas(
           `(expected > current — corruption or multi-coordinator violation)`,
       });
       return;
+    default:
+      // Exhaustiveness guard: because this handler returns Promise<void>,
+      // tsc's noImplicitReturns does NOT catch a missing CasOutcome variant.
+      // assertNever makes a future 4th kind a COMPILE error instead of a
+      // silently-dropped HTTP response.
+      return assertNever(outcome);
   }
+}
+
+/** Compile-time exhaustiveness marker; unreachable at runtime. */
+function assertNever(x: never): never {
+  throw new Error(`unhandled CasOutcome variant: ${JSON.stringify(x)}`);
 }
 
 /** Parse + dispatch helper for use from server.ts. */

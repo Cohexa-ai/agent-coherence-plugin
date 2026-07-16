@@ -231,12 +231,19 @@ test("policy/track: adds + rejects, exact validation strings, live-reload end-to
     assert.equal(tooMany.status, 400);
     assert.deepEqual(tooMany.body, { error: "max 20 paths per request" });
 
-    const r = await post("/policy/track", { paths: ["notes.md", "/abs.md", "../up.md"] });
+    // Rejection reasons are byte-identical to Python validate_path (the
+    // corpus pins them cross-runtime). Includes the control-char guard that
+    // closes the YAML newline-injection vector.
+    const r = await post("/policy/track", {
+      paths: ["notes.md", "/abs.md", "../up.md", "a\n- /etc/passwd", "\\win.md"],
+    });
     assert.equal(r.status, 200);
     assert.deepEqual(r.body.added, ["notes.md"]);
     assert.deepEqual(r.body.rejected, [
-      { path: "/abs.md", reason: "absolute path" },
-      { path: "../up.md", reason: "contains '..'" },
+      { path: "/abs.md", reason: "path must be relative (no leading /)" },
+      { path: "../up.md", reason: "path contains '..' traversal" },
+      { path: "a\n- /etc/passwd", reason: "path contains control characters" },
+      { path: "\\win.md", reason: "path must be relative (no leading \\)" },
     ]);
 
     // Integration: the newly-tracked path is live for hooks with NO restart —

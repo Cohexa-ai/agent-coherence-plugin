@@ -168,3 +168,28 @@ test("SubagentStop scoped release: stopping A frees A's grant, never the parent'
     await cleanup();
   }
 });
+
+test("P1: session-stop with a present-but-MALFORMED agent_id must NOT release the parent's grants", async () => {
+  const { post, cleanup } = await makeServer();
+  try {
+    // Parent (no agent_id) acquires EXCLUSIVE.
+    const acq = await post("/hooks/pre-edit", { session_id: SID, path: "CLAUDE.md" });
+    assert.equal(acq.ok, true);
+
+    // A subagent-stop arrives carrying a non-empty but shape-invalid agent_id
+    // (what buildSubagentStop now blocks client-side, but the server must ALSO
+    // fail closed as defense-in-depth). It must be a no-op, NOT a parent release.
+    const stop = await post("/hooks/session-stop", { session_id: SID, agent_id: "bad.id" });
+    assert.equal(stop.ok, true);
+    assert.deepEqual(stop.released_artifacts, []);
+
+    // Proof the parent's grant SURVIVED the malformed stop: a subsequent
+    // legitimate parent stop (absent agent_id) can still release it. Had the
+    // malformed stop degraded to a parent release, this would be empty.
+    const parentStop = await post("/hooks/session-stop", { session_id: SID });
+    assert.equal(parentStop.ok, true);
+    assert.deepEqual(parentStop.released_artifacts, ["CLAUDE.md"]);
+  } finally {
+    await cleanup();
+  }
+});

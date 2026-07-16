@@ -22,17 +22,27 @@ function makeRoot(): { root: string; cleanup: () => void } {
   return { root, cleanup: () => rmSync(root, { recursive: true, force: true }) };
 }
 
-test("appendPolicyYaml: fresh file — adds valid paths, rejects traversal/absolute/empty", () => {
+test("appendPolicyYaml: fresh file — adds valid paths, rejects traversal/absolute/empty/control/backslash (Python validate_path parity)", () => {
   const { root, cleanup } = makeRoot();
   try {
     const yamlPath = join(root, ".coherence", "tracked.yaml");
-    const out = appendPolicyYaml(yamlPath, ["notes.md", "/etc/passwd", "../up.md", ""]);
+    const out = appendPolicyYaml(yamlPath, [
+      "notes.md",
+      "/etc/passwd",
+      "../up.md",
+      "",
+      "inject\n- /etc/shadow",
+      "\\leading-backslash.md",
+    ]);
     assert.deepEqual(out.added, ["notes.md"]);
     assert.deepEqual(out.rejected, [
-      { path: "/etc/passwd", reason: "absolute path" },
-      { path: "../up.md", reason: "contains '..'" },
-      { path: "", reason: "empty" },
+      { path: "/etc/passwd", reason: "path must be relative (no leading /)" },
+      { path: "../up.md", reason: "path contains '..' traversal" },
+      { path: "", reason: "path is empty" },
+      { path: "inject\n- /etc/shadow", reason: "path contains control characters" },
+      { path: "\\leading-backslash.md", reason: "path must be relative (no leading \\)" },
     ]);
+    // The newline-injection candidate never reaches disk — only the safe path.
     assert.equal(readFileSync(yamlPath, "utf8"), "- notes.md\n");
   } finally {
     cleanup();
@@ -70,9 +80,12 @@ test("appendPolicyYaml: byte cap → throws Python's exact message", () => {
   const { root, cleanup } = makeRoot();
   try {
     const yamlPath = join(root, ".coherence", "tracked.yaml");
-    const huge = "x".repeat(MAX_POLICY_YAML_BYTES);
+    // Each path stays under the per-path 1024-char limit (else it's rejected
+    // pre-cap now); the CAP fires on the accumulated YAML size. ~200 × ~520B
+    // comfortably exceeds MAX_POLICY_YAML_BYTES (64 KiB).
+    const many = Array.from({ length: 200 }, (_, i) => `d/${String(i).padStart(3, "0")}-${"a".repeat(500)}.md`);
     assert.throws(
-      () => appendPolicyYaml(yamlPath, [huge]),
+      () => appendPolicyYaml(yamlPath, many),
       new RegExp(`policy YAML cap of ${MAX_POLICY_YAML_BYTES} bytes would be exceeded`),
     );
   } finally {

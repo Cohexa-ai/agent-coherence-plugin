@@ -596,10 +596,30 @@ export class ArtifactRegistry {
    * literal prefix like `docs_v2/` cannot wildcard-match `docsXv2/`.
    */
   artifactNamesUnderPrefix(prefix: string): string[] {
-    const escaped = prefix.replace(/([\\%_])/g, "\\$1");
+    // Empty / "." / "./" ⇒ all artifacts (Grep over the workspace root).
+    // Mirrors Python artifact_names_under_prefix. P1: the bare-LIKE version
+    // both OVER-matched siblings ("docs/specs" catching "docs/specs-internal/")
+    // and returned [] for a "." search_root — silently skipping the entire
+    // pre-grep stale check for the very common workspace-root Grep.
+    if (prefix === "" || prefix === "." || prefix === "./") {
+      const all = this.db
+        .prepare(`SELECT name FROM artifacts ORDER BY name`)
+        .all() as { name: string }[];
+      return all.map((r) => r.name);
+    }
+    // Strip trailing slash(es) then append exactly one, so the LIKE prefix
+    // matches only true directory children — not sibling dirs sharing the
+    // stem. UNION an exact-match so a search_root that IS a tracked file
+    // still matches it.
+    const stripped = prefix.replace(/\/+$/, "");
+    const escaped = `${stripped}/`.replace(/([\\%_])/g, "\\$1");
     const rows = this.db
-      .prepare(`SELECT name FROM artifacts WHERE name LIKE ? ESCAPE '\\' ORDER BY name`)
-      .all(`${escaped}%`) as { name: string }[];
+      .prepare(
+        `SELECT name FROM artifacts WHERE name LIKE ? ESCAPE '\\'
+         UNION SELECT name FROM artifacts WHERE name = ?
+         ORDER BY name`,
+      )
+      .all(`${escaped}%`, stripped) as { name: string }[];
     return rows.map((r) => r.name);
   }
 

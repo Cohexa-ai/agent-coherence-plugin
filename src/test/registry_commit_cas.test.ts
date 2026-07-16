@@ -168,22 +168,31 @@ test("commitCas serialized: two OCC writers on one version — exactly one wins"
   }
 });
 
-test("artifactNamesUnderPrefix: prefix filter, empty prefix = all, LIKE metachars literal", () => {
+test("artifactNamesUnderPrefix: directory-boundary match, empty/'.'/'./'=all, LIKE metachars literal (Python parity)", () => {
   const { registry, cleanup } = makeRegistry();
   try {
     registry.resolveOrRegisterArtifact("docs/plans/a.md", HASH_1);
     registry.resolveOrRegisterArtifact("docs/specs/b.md", HASH_1);
     registry.resolveOrRegisterArtifact("plan.md", HASH_1);
-    registry.resolveOrRegisterArtifact("docs_v2/c.md", HASH_1);
-    assert.deepEqual(registry.artifactNamesUnderPrefix("docs/"), [
-      "docs/plans/a.md",
-      "docs/specs/b.md",
-    ]);
-    assert.equal(registry.artifactNamesUnderPrefix("").length, 4);
+    registry.resolveOrRegisterArtifact("docs-internal/c.md", HASH_1); // sibling stem
+    registry.resolveOrRegisterArtifact("a_b/x.md", HASH_1); // literal underscore
+    registry.resolveOrRegisterArtifact("aXb/y.md", HASH_1); // would match if _ were a wildcard
+
+    // P1: a prefix must match only true directory children, NOT a sibling
+    // dir sharing the stem ("docs" must not bleed into "docs-internal/").
+    // With or without a trailing slash.
+    assert.deepEqual(registry.artifactNamesUnderPrefix("docs"), ["docs/plans/a.md", "docs/specs/b.md"]);
+    assert.deepEqual(registry.artifactNamesUnderPrefix("docs/"), ["docs/plans/a.md", "docs/specs/b.md"]);
+    // "" / "." / "./" → all artifacts (Grep over workspace root) — the bug was
+    // "." returning [] and silently skipping the whole pre-grep stale check.
+    assert.equal(registry.artifactNamesUnderPrefix("").length, 6);
+    assert.equal(registry.artifactNamesUnderPrefix(".").length, 6);
+    assert.equal(registry.artifactNamesUnderPrefix("./").length, 6);
     assert.deepEqual(registry.artifactNamesUnderPrefix("nomatch/"), []);
-    // `_` in the prefix must be literal, not a LIKE wildcard: "docs_" must
-    // NOT match "docs/plans/…".
-    assert.deepEqual(registry.artifactNamesUnderPrefix("docs_"), ["docs_v2/c.md"]);
+    // `_` is a literal, not a LIKE wildcard: "a_b/" matches only "a_b/…".
+    assert.deepEqual(registry.artifactNamesUnderPrefix("a_b"), ["a_b/x.md"]);
+    // A search_root that IS a tracked file matches itself (the UNION exact arm).
+    assert.deepEqual(registry.artifactNamesUnderPrefix("plan.md"), ["plan.md"]);
   } finally {
     cleanup();
   }
