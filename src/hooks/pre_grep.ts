@@ -19,6 +19,7 @@ import {
   isValidSessionId,
   isValidPath,
   nowTick as nowTickFn,
+  readSubagentId,
 } from "./_common.js";
 
 interface PreGrepBody {
@@ -52,7 +53,7 @@ export async function handlePreGrep(
     return;
   }
 
-  const agentId = deps.sessions.registerSession(body.session_id);
+  const agentId = deps.sessions.registerSession(body.session_id, readSubagentId(body as Record<string, unknown>));
   const now = nowTickFn();
 
   const staleSummaries: Array<{ path: string; current_version: number }> = [];

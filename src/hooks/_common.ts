@@ -116,6 +116,21 @@ export async function readJsonBody(
 const SESSION_ID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
 const CONTENT_HASH_RE = /^[0-9a-fA-F]{64}$/;
 
+const SUBAGENT_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
+
+/**
+ * SB-25: optional subagent identity from the hook request body. Accepts the
+ * documented snake_case `agent_id` with a defensive camelCase `agentId`
+ * fallback (wire casing pinned by the R6 live capture). Additive +
+ * backward-compatible: absent/invalid resolves to null (the parent
+ * identity), never a 400. Mirrors Python `read_subagent_id`.
+ */
+export function readSubagentId(body: Record<string, unknown>): string | null {
+  const raw = body.agent_id !== undefined ? body.agent_id : body.agentId;
+  if (typeof raw === "string" && SUBAGENT_ID_RE.test(raw)) return raw;
+  return null;
+}
+
 export function isValidSessionId(s: unknown): s is string {
   return typeof s === "string" && SESSION_ID_RE.test(s);
 }

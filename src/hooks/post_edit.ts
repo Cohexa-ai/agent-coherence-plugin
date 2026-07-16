@@ -23,6 +23,7 @@ import {
   isValidPath,
   isValidContentHashRequired,
   isValidContentHashOrAbsent,
+  readSubagentId,
 } from "./_common.js";
 
 export type PostEditDeps = HookDeps;
@@ -70,7 +71,7 @@ export async function handlePostEdit(
     return;
   }
 
-  const agentId = deps.sessions.registerSession(sessionId);
+  const agentId = deps.sessions.registerSession(sessionId, readSubagentId(body as Record<string, unknown>));
   const nowTick = Math.floor(Date.now() / 1000);
 
   const existing = deps.registry.getArtifactByName(path);

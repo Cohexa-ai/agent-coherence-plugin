@@ -29,6 +29,7 @@ import {
   readJsonBody,
   isValidSessionId,
   nowTick as nowTickFn,
+  readSubagentId,
 } from "./_common.js";
 
 const MAX_COMMAND_LENGTH = 16384;
@@ -80,7 +81,7 @@ export async function handlePreBash(
     return;
   }
 
-  const agentId = deps.sessions.registerSession(body.session_id);
+  const agentId = deps.sessions.registerSession(body.session_id, readSubagentId(body as Record<string, unknown>));
   const now = nowTickFn();
 
   const staleSummaries: Array<{ path: string; current_version: number }> = [];

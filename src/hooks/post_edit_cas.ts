@@ -26,6 +26,7 @@ import {
   isValidSessionId,
   isValidContentHashRequired,
   nowTick as nowTickFn,
+  readSubagentId,
 } from "./_common.js";
 
 interface PostEditCasBody {
@@ -68,7 +69,7 @@ export async function handlePostEditCas(
     return;
   }
 
-  const agentId = deps.sessions.registerSession(body.session_id);
+  const agentId = deps.sessions.registerSession(body.session_id, readSubagentId(body as Record<string, unknown>));
   const artifact = deps.registry.getArtifactByName(path);
   if (artifact === null) {
     writeJson(res, 200, { ok: true, note: "untracked-at-commit" });

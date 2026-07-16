@@ -40,6 +40,7 @@ import {
   isValidSessionId,
   isValidPath,
   isValidContentHashOrAbsent,
+  readSubagentId,
 } from "./_common.js";
 
 export type PreReadDeps = HookDeps;
@@ -80,7 +81,7 @@ export async function handlePreRead(
     return;
   }
 
-  const agentId = deps.sessions.registerSession(sessionId);
+  const agentId = deps.sessions.registerSession(sessionId, readSubagentId(body as Record<string, unknown>));
   const nowTick = Math.floor(Date.now() / 1000);
 
   // Lookup artifact by path. None → KTD-9 first observation.

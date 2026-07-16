@@ -20,6 +20,7 @@ import {
   writeError,
   readJsonBody,
   isValidSessionId,
+  readSubagentId,
 } from "./_common.js";
 
 export type SessionStopDeps = HookDeps;
@@ -38,7 +39,7 @@ export async function handleSessionStop(
     return;
   }
   const sessionId: string = body.session_id;
-  const agentId = deps.sessions.registerSession(sessionId);
+  const agentId = deps.sessions.registerSession(sessionId, readSubagentId(body as Record<string, unknown>));
   const nowTick = Math.floor(Date.now() / 1000);
 
   // Per KTD-11: enumerate held M/E grants and release each. Released paths

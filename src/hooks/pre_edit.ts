@@ -32,6 +32,7 @@ import {
   readJsonBody,
   isValidSessionId,
   isValidPath,
+  readSubagentId,
 } from "./_common.js";
 
 export type PreEditDeps = HookDeps;
@@ -62,7 +63,7 @@ export async function handlePreEdit(
     return;
   }
 
-  const agentId = deps.sessions.registerSession(sessionId);
+  const agentId = deps.sessions.registerSession(sessionId, readSubagentId(body as Record<string, unknown>));
   const nowTick = Math.floor(Date.now() / 1000);
 
   // Resolve-or-seed the artifact. Empty content_hash sentinel matches Python:
