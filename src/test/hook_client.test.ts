@@ -241,3 +241,16 @@ test("end-to-end: pre-bash through the real client against a live coordinator", 
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("buildSubagentStop: agent_id REQUIRED (absence must never release the parent)", async () => {
+  const { buildSubagentStop } = await import("../hook_client.js");
+  assert.deepEqual(buildSubagentStop({ session_id: SID, agent_id: "sub-1" }), {
+    session_id: SID,
+    agent_id: "sub-1",
+  });
+  assert.deepEqual(buildSubagentStop({ session_id: SID, agentId: "sub-2" }), {
+    session_id: SID,
+    agent_id: "sub-2",
+  });
+  assert.throws(() => buildSubagentStop({ session_id: SID }), SkipHook);
+});

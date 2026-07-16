@@ -142,3 +142,29 @@ test("backward-compat: agent_id absent/invalid resolves to the parent identity",
     await cleanup();
   }
 });
+
+test("SubagentStop scoped release: stopping A frees A's grant, never the parent's or a sibling's", async () => {
+  const { post, cleanup } = await makeServer();
+  try {
+    // Parent holds EXCLUSIVE on one artifact; subagent A on another.
+    await post("/hooks/pre-edit", { session_id: SID, path: "AGENTS.md" });
+    await post("/hooks/pre-edit", { session_id: SID, agent_id: SUB_A, path: "CLAUDE.md" });
+
+    // SubagentStop for A → releases A's grant (session-stop verb, composite id).
+    const stop = await post("/hooks/session-stop", { session_id: SID, agent_id: SUB_A });
+    assert.equal(stop.ok, true);
+    assert.deepEqual(stop.released_artifacts, ["CLAUDE.md"]);
+
+    // A's artifact is free: sibling B acquires with NO collision warning.
+    const b = await post("/hooks/pre-edit", { session_id: SID, agent_id: SUB_B, path: "CLAUDE.md" });
+    assert.equal(b.ok, true);
+    assert.equal("hookSpecificOutput" in b, false);
+
+    // The PARENT's grant was untouched: a sibling editing AGENTS.md collides.
+    const c = await post("/hooks/pre-edit", { session_id: SID, agent_id: SUB_B, path: "AGENTS.md" });
+    assert.equal(c.ok, true);
+    assert.ok(c.hookSpecificOutput, "parent's grant must still be held");
+  } finally {
+    await cleanup();
+  }
+});

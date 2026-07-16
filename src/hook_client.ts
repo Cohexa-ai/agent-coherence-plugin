@@ -46,6 +46,7 @@ export const SUBCOMMANDS = [
   "pre-edit",
   "post-edit",
   "session-stop",
+  "subagent-stop",
   "pre-bash",
   "pre-grep",
 ] as const;
@@ -56,6 +57,7 @@ const ENDPOINT_BY_SUBCOMMAND: Record<Subcommand, string> = {
   "pre-edit": "/hooks/pre-edit",
   "post-edit": "/hooks/post-edit",
   "session-stop": "/hooks/session-stop",
+  "subagent-stop": "/hooks/session-stop",
   "pre-bash": "/hooks/pre-bash",
   "pre-grep": "/hooks/pre-grep",
 };
@@ -92,9 +94,13 @@ export function toWorkspaceRelative(filePath: string, root: string): string {
   return rel;
 }
 
-/** SB-25 thread: carry a subagent agent_id through when CC supplies one. */
+/**
+ * SB-25 thread: carry a subagent agent_id through when CC supplies one.
+ * snake_case `agent_id` preferred, camelCase `agentId` fallback (wire
+ * casing pinned by the R6 live capture) — mirrors readSubagentId.
+ */
 function withAgentId(cc: CcPayload, body: Record<string, unknown>): Record<string, unknown> {
-  const aid = cc.agent_id;
+  const aid = cc.agent_id !== undefined ? cc.agent_id : cc.agentId;
   if (typeof aid === "string" && aid !== "") body.agent_id = aid;
   return body;
 }
@@ -142,6 +148,21 @@ export function buildSessionStop(cc: CcPayload): Record<string, unknown> {
   return withAgentId(cc, { session_id: requireSessionId(cc) });
 }
 
+/**
+ * SB-25 Unit 4: SubagentStop → scoped grant release via the session-stop
+ * verb. The subagent identity is MANDATORY here — a SubagentStop payload
+ * without an agent id must NOT fall back to the parent identity (that would
+ * release the parent's live grants); absence skips (fail-open `{}`).
+ */
+export function buildSubagentStop(cc: CcPayload): Record<string, unknown> {
+  const sessionId = requireSessionId(cc);
+  const aid = cc.agent_id !== undefined ? cc.agent_id : cc.agentId;
+  if (typeof aid !== "string" || aid === "") {
+    throw new SkipHook("agent_id missing for subagent-stop");
+  }
+  return { session_id: sessionId, agent_id: aid };
+}
+
 export function buildPreBash(cc: CcPayload): Record<string, unknown> {
   const sessionId = requireSessionId(cc);
   const command = toolInput(cc).command;
@@ -177,6 +198,8 @@ export function buildPayload(sub: Subcommand, cc: CcPayload, root: string): Reco
       return buildPostEdit(cc, root);
     case "session-stop":
       return buildSessionStop(cc);
+    case "subagent-stop":
+      return buildSubagentStop(cc);
     case "pre-bash":
       return buildPreBash(cc);
     case "pre-grep":

@@ -71,6 +71,17 @@
           }
         ]
       }
+    ],
+    "SubagentStop": [
+      {
+        "_comment": "SB-25 Unit 4: release the SUBAGENT identity's uncommitted grants when it stops (the heartbeat/idle sweep is the missed-stop backstop). The subcommand requires the payload's agent_id - absent means no-op {}, never a parent release.",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/hook-client\" subagent-stop"
+          }
+        ]
+      }
     ]
   }
 }
