@@ -35,7 +35,7 @@
     "eslint": "^10.5.0",
     "globals": "^17.6.0",
     "prettier": "^3.9.5",
-    "typescript": "^6.0.3"
+    "typescript": "^7.0.2"
   },
   "homepage": "https://github.com/Cohexa-ai/agent-coherence-plugin",
   "repository": {
