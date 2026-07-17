@@ -23,7 +23,7 @@ Watches tracked artifacts (CLAUDE.md, AGENTS.md, `DECISIONS.md`, `docs/specs/`, 
 
 - Agent View ✓
 - Multi-terminal (multiple `claude` processes in the same workspace) ✓
-- Task-tool subagents (subagent hooks fire under the parent's `session_id`; warnings surface to the parent's context) ✓
+- Task-tool subagents (each subagent is a first-class coherence peer via a composite `(session_id, agent_id)` identity — sibling subagents editing the same artifact collide, and a subagent's write is attributed to the subagent, not the parent; see [Subagents and composite identity](#subagents-and-composite-identity)) ✓
 
 Verified against `claude` v2.1.131 (2026-05-17 via internal Phase E.0 probe). The `claude agents` subcommand on v2.1.131 is a management UI, not a session spawner — out of coverage scope.
 
@@ -84,7 +84,7 @@ Everything below is a **library console script** installed by `pip install "agen
 | `agent-coherence-migrate-rules` | Scan CLAUDE.md for prose tool-class rules; propose + optionally `--apply` `permissions.deny` entries | First-pass migration of `"use rg, not grep"`-style rules to enforceable policy |
 | `agent-coherence-migrate-deny` *(library v0.8.2+)* | Stricter sibling: STDOUT-only, symlink-contained, never invokes an LLM, never writes settings.json | Security-sensitive workspaces; CI-driven migration where auto-apply is not acceptable |
 
-To bridge the two, the plugin ships PATH-resolver shims at `bin/agent-coherence-{status,track,untrack,migrate-deny}` that probe for the real binary (PATH first, then `<cwd>/.venv/bin/`, then `<git-root>/.venv/bin/`) before falling back to an actionable error. This means the slash commands work whether or not the operator activated the project venv before launching `claude` — including Claude UI / remote-control sessions that inherit a system shell env without venv activation. `bin/ensure-coordinator` is the SessionStart sibling shim using the same probing pattern.
+To bridge the two, the plugin ships PATH-resolver shims at `bin/agent-coherence-{status,track,untrack,migrate-deny}`. The CLI shims prefer the bundled Node CLI (`dist/cli_*.js`) and fall back to probing for the Python binary (PATH first, then `<cwd>/.venv/bin/`, then `<git-root>/.venv/bin/`) before an actionable error — so the slash commands work whether or not the operator activated the project venv before launching `claude`, including Claude UI / remote-control sessions that inherit a system shell env without venv activation. Two more shims handle dispatch: `bin/ensure-coordinator-dispatch` is the backend-aware `SessionStart` bootstrap (selects the Node or Python coordinator), and `bin/hook-client` is the universal per-hook shim (Node client preferred, Python client fallback, `{}` fail-open floor).
 
 ## Getting started
 
@@ -109,7 +109,9 @@ First-time experience: on your first Read of a tracked file in a workspace, you'
 
 The marketplace add resolves to the latest published release. To pin a specific version: `/plugin marketplace add hipvlady/agent-coherence-plugin@v0.2.2`.
 
-You also need the Python library that provides the coordinator + hook client:
+**Two backends, two install paths — pick one:**
+
+**A. Python backend (default, richest feature set).** Install the library that provides the coordinator + hook client:
 
 ```bash
 pip install "agent-coherence>=0.8.0"
@@ -118,6 +120,14 @@ pip install "agent-coherence>=0.8.0"
 command -v agent-coherence-coordinator
 command -v agent-coherence-hook-client
 ```
+
+**B. Node backend (zero-Python).** As of the self-sufficient Node coordinator, you can skip `pip install` entirely — the plugin's bundled `dist/` runs all six hooks, the track/untrack/status CLIs, and strict mode with **no Python required** (needs **Node ≥ 20**, where `better-sqlite3` ships prebuilts). Opt a workspace into it with one line:
+
+```bash
+mkdir -p .coherence && printf 'node\n' > .coherence/coordinator_backend
+```
+
+See [§ Coordinator backends](#architecture) for the selection rules and the one remaining Python-only helper (`agent-coherence-migrate-deny`). Both backends speak the same wire contract at byte-parity.
 
 After install, restart any running `claude` sessions in your workspace so the new `SessionStart` hook fires.
 
@@ -167,6 +177,16 @@ agent-coherence-migrate-deny --workspace . | jq
 
 **Strict mode works on both coordinator backends.** The Node coordinator now enforces strict-mode denies at byte-parity with Python (guarded by the `protocol_corpus` strict-mode fixtures), so a Node-backend workspace honors `.coherence/strict_mode.yaml` the same way. Select the backend per §[Coordinator backends](#architecture) below.
 
+## Subagents and composite identity
+
+A Claude Code subagent (spawned via the Task tool) runs under its **parent's** `session_id`, so without extra handling every subagent and the parent would collapse into one coordinator identity — sibling subagents editing the same artifact would never see each other, and a subagent's write would be mis-attributed to the parent. The coordinator folds the subagent's hook-payload `agent_id` into a **composite `(session_id, agent_id)` identity** so each subagent is a first-class coherence peer:
+
+- **Sibling collision** — two subagents of the same parent editing the same tracked artifact now collide (previously a silent lost update).
+- **Attribution** — a subagent's commit is credited to the subagent in a peer's stale-read warning; `/status` shows the subagent as `claude-session-<sid>:subagent-<aid>`, keeping the parent linkage visible.
+- **Scoped release** — the `SubagentStop` hook releases *only* that subagent's uncommitted grants (never the parent's). A stop payload with an absent `agent_id` is a normal parent stop; a present-but-malformed one is refused (no-op), never a parent-scoped release.
+
+This is **additive and fail-open**: if a hook payload carries no `agent_id`, the identity resolves to the parent exactly as before — nothing regresses for main-thread or single-session work. It is enforced identically on both coordinator backends.
+
 ## Configuration
 
 The coordinator creates `.coherence/` at your repo root automatically. Inside it:
@@ -185,7 +205,7 @@ The coordinator creates `.coherence/` at your repo root automatically. Inside it
 
 ## How it works
 
-A lazy-spawned local HTTP coordinator at the parent repo root (`<repo>/.coherence/`) wraps a SQLite-WAL state store implementing the MESI cache-coherence protocol. Plugin hooks are **command-type** (not HTTP-type — Claude Code v2.1.131's hooks.json schema validator rejects URLs containing env-var templates at load time, per internal Phase E.0 probe 2A); each hook invokes `agent-coherence-hook-client` which reads `.coherence/server.pid` for the port + `.coherence/hook.secret` for the bearer token, then POSTs the hook payload to the coordinator. PreToolUse fires for every `Read`, `Edit`, `Write`, `Bash`, `Grep`; PostToolUse commits writes and triggers peer invalidations; Stop releases any uncommitted EXCLUSIVE grants at end-of-turn. All HTTP traffic is `127.0.0.1`-bound. Coordinator idle-shuts after 15 minutes; SQLite state rehydrates on next spawn.
+A lazy-spawned local HTTP coordinator at the parent repo root (`<repo>/.coherence/`) wraps a SQLite-WAL state store implementing the MESI cache-coherence protocol. Plugin hooks are **command-type** (not HTTP-type — Claude Code v2.1.131's hooks.json schema validator rejects URLs containing env-var templates at load time, per internal Phase E.0 probe 2A); each hook invokes the `bin/hook-client` shim (Node client preferred, Python `agent-coherence-hook-client` fallback) which reads `.coherence/server.pid` for the port + `.coherence/hook.secret` for the bearer token, then POSTs the hook payload to the coordinator. PreToolUse fires for every `Read`, `Edit`, `Write`, `Bash`, `Grep`; PostToolUse commits writes and triggers peer invalidations; Stop releases any uncommitted EXCLUSIVE grants at end-of-turn; SubagentStop releases a stopped subagent's own grants (see [subagent identity](#subagents-and-composite-identity)). All HTTP traffic is `127.0.0.1`-bound. Coordinator idle-shuts after 15 minutes; SQLite state rehydrates on next spawn.
 
 ## Architecture
 
