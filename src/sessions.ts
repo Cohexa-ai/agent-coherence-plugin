@@ -27,28 +27,50 @@ export class SessionRegistry {
   // Reverse: agent_id → session_id. Used for last_writer_session_id lookup.
   private readonly byAgentId = new Map<string, string>();
 
+  // agent_id → human-readable agent name (parent linkage stays visible on
+  // /status for subagent identities). SB-25.
+  private readonly nameByAgentId = new Map<string, string>();
+
   /**
-   * Register a session by its Claude Code session_id. Returns the
-   * deterministic agent_id (UUID hex). Idempotent on repeated calls.
+   * Register a session by its Claude Code session_id, optionally scoped to a
+   * subagent identity (SB-25 composite derivation — see agent_id.ts).
+   * Returns the deterministic agent_id (UUID hex). Idempotent.
+   *
+   * R2 attribution: for a subagent identity the REVERSE lookup returns the
+   * SUBAGENT id (not the parent session), so warn/deny prose `[:8]` names
+   * the actual writer — mirrors Python `_agent_id_to_session`.
    */
-  registerSession(sessionId: string): string {
-    const cached = this.bySessionId.get(sessionId);
+  registerSession(sessionId: string, subagentId?: string | null): string {
+    const cacheKey =
+      subagentId != null && subagentId !== "" ? `${sessionId}:${subagentId}` : sessionId;
+    const cached = this.bySessionId.get(cacheKey);
     if (cached !== undefined) return cached;
-    const agentId = sessionToAgentId(sessionId);
-    this.bySessionId.set(sessionId, agentId);
-    this.byAgentId.set(agentId, sessionId);
+    const agentId = sessionToAgentId(sessionId, subagentId);
+    this.bySessionId.set(cacheKey, agentId);
+    this.byAgentId.set(
+      agentId,
+      subagentId != null && subagentId !== "" ? subagentId : sessionId,
+    );
+    this.nameByAgentId.set(
+      agentId,
+      subagentId != null && subagentId !== ""
+        ? `${sessionToAgentName(sessionId)}:subagent-${subagentId}`
+        : sessionToAgentName(sessionId),
+    );
     return agentId;
   }
 
-  /** Reverse lookup: agent_id (UUID hex) → session_id, or null if unknown. */
+  /**
+   * Reverse lookup: agent_id (UUID hex) → the ATTRIBUTION id — the
+   * session_id for a parent, the subagent id for a subagent. Null if unknown.
+   */
   agentIdToSessionId(agentId: string): string | null {
     return this.byAgentId.get(agentId) ?? null;
   }
 
   /** Human-readable agent name; mirrors Python `session_to_agent_name`. */
   agentIdToName(agentId: string): string | null {
-    const sessionId = this.agentIdToSessionId(agentId);
-    return sessionId === null ? null : sessionToAgentName(sessionId);
+    return this.nameByAgentId.get(agentId) ?? null;
   }
 
   /** All currently-known agent_ids. For /status diagnostics. */

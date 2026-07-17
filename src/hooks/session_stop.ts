@@ -20,6 +20,8 @@ import {
   writeError,
   readJsonBody,
   isValidSessionId,
+  readSubagentId,
+  hasSubagentIdField,
 } from "./_common.js";
 
 export type SessionStopDeps = HookDeps;
@@ -38,7 +40,21 @@ export async function handleSessionStop(
     return;
   }
   const sessionId: string = body.session_id;
-  const agentId = deps.sessions.registerSession(sessionId);
+  const subagentId = readSubagentId(body as Record<string, unknown>);
+
+  // P1 subagent-stop safety: session-stop RELEASES grants, so a malformed
+  // agent_id must NOT silently degrade to the parent identity — that would
+  // release the parent's live grants. Absent agent_id = a legitimate parent
+  // Stop (release the parent's own grants, unchanged). Present-but-invalid =
+  // refuse (no-op), since the caller intended a scoped subagent release the
+  // server can't resolve. This fail-closed guard is why the read paths (where
+  // a malformed id degrading to parent attribution is benign) can stay lax.
+  if (subagentId === null && hasSubagentIdField(body as Record<string, unknown>)) {
+    writeJson(res, 200, { ok: true, released_artifacts: [] });
+    return;
+  }
+
+  const agentId = deps.sessions.registerSession(sessionId, subagentId);
   const nowTick = Math.floor(Date.now() / 1000);
 
   // Per KTD-11: enumerate held M/E grants and release each. Released paths

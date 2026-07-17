@@ -22,10 +22,16 @@ import { MESIState } from "../states.js";
 import {
   buildStaleResponse,
   buildFreshWithNotice,
+  emitStrictDeny,
   nowUnix,
   preemptionNoticeText,
   type StaleSummary,
 } from "../hook_payloads.js";
+
+/** Synthetic launch-gate sentinel hash — carries no content claim (Python `_F_SENTINEL_CONTENT_HASH`). */
+const F_SENTINEL_CONTENT_HASH = "f".repeat(64);
+/** Survivor #6 R2: self-commit → disk-flush lag window (Python `_SHARED_FOREIGN_DENY_LAG_WINDOW_SEC`). */
+const SHARED_FOREIGN_DENY_LAG_WINDOW_SEC = 5.0;
 import {
   type HookDeps,
   writeJson,
@@ -34,6 +40,7 @@ import {
   isValidSessionId,
   isValidPath,
   isValidContentHashOrAbsent,
+  readSubagentId,
 } from "./_common.js";
 
 export type PreReadDeps = HookDeps;
@@ -74,7 +81,7 @@ export async function handlePreRead(
     return;
   }
 
-  const agentId = deps.sessions.registerSession(sessionId);
+  const agentId = deps.sessions.registerSession(sessionId, readSubagentId(body as Record<string, unknown>));
   const nowTick = Math.floor(Date.now() / 1000);
 
   // Lookup artifact by path. None → KTD-9 first observation.
@@ -103,6 +110,57 @@ export async function handlePreRead(
   const agentState = deps.registry.getAgentState(artifactId, agentId);
 
   if (agentState !== null && agentState !== MESIState.INVALID) {
+    // Survivor #6 v1 SHARED-holder foreign-edit arm (Unit 6, mirrors Python
+    // pre-read): a still-SHARED reader proves no peer commit since its grant,
+    // so a disk-hash mismatch is either this session's own commit→disk-flush
+    // lag (≤5s, suppress) or a foreign out-of-band edit (strict → deny).
+    // Sentinel recorded hashes carry no content claim and must not fire.
+    if (
+      agentState === MESIState.SHARED &&
+      contentHash !== null &&
+      contentHash !== "" &&
+      existingArtifact.content_hash !== "" &&
+      existingArtifact.content_hash !== F_SENTINEL_CONTENT_HASH &&
+      contentHash !== existingArtifact.content_hash &&
+      deps.policy.isStrictMode(path)
+    ) {
+      const now = nowUnix();
+      const lastWriterSession =
+        existingArtifact.last_writer_id !== null
+          ? deps.sessions.agentIdToSessionId(existingArtifact.last_writer_id)
+          : null;
+      // P1: compare the raw writer identity against THIS caller's composite
+      // agentId — NOT agentIdToSessionId(...) vs the parent session_id. Since
+      // SB-25 made the reverse lookup return a subagent's bare attribution id,
+      // the old session-string comparison could never match for a subagent's
+      // own commit, so its immediate self-re-read was wrongly denied as a
+      // "foreign edit." (lastWriterSession is kept only for the summary field.)
+      const isSelfCommitLag =
+        existingArtifact.last_writer_id === agentId &&
+        now - existingArtifact.updated_at <= SHARED_FOREIGN_DENY_LAG_WINDOW_SEC;
+      if (!isSelfCommitLag) {
+        const sharedSummary: StaleSummary = {
+          path,
+          current_version: existingArtifact.version,
+          // A SHARED holder was granted on the current version.
+          prior_version_seen_by_session: existingArtifact.version,
+          last_writer_session_id: lastWriterSession ?? "<unknown>",
+          last_writer_at_unix_ts: existingArtifact.updated_at,
+          warning_generated_at_unix_ts: now,
+          hash_differs: true,
+        };
+        // KTD-T: leave the grant untouched so retries re-deny byte-stably.
+        writeJson(res, 200, {
+          hookSpecificOutput: emitStrictDeny({
+            source: "pre_read_shared_hash_deny",
+            summary: sharedSummary,
+          }),
+          status: "stale",
+          summary: sharedSummary,
+        });
+        return;
+      }
+    }
     // Reader has a valid grant (SHARED, EXCLUSIVE, or MODIFIED) on the
     // current version. Fresh.
     const notice = buildAdditionalNoticeText(deps, agentId);
@@ -143,6 +201,25 @@ export async function handlePreRead(
     warning_generated_at_unix_ts: nowUnix(),
     hash_differs: hashDiffers,
   };
+
+  // v0.2 KTD-O/KTD-P strict-mode deny gate (Unit 6, mirrors Python):
+  // 1. INVALID — true preemption; the session's context carries stale beliefs.
+  // 2. None AND hash_differs — no prior grant AND the disk bytes diverge from
+  //    the registry's recorded canonical. Hashes matching falls through to
+  //    the warn-mode allow (the (None, matches) truth-table cell must NOT deny).
+  // KTD-T: do NOT re-grant SHARED on deny — the state stays INVALID/None so
+  // every retry produces the same byte-stable deny text.
+  if (
+    deps.policy.isStrictMode(path) &&
+    (agentState === MESIState.INVALID || (agentState === null && hashDiffers))
+  ) {
+    writeJson(res, 200, {
+      hookSpecificOutput: emitStrictDeny({ source: "pre_read_strict_deny", summary }),
+      status: "stale",
+      summary,
+    });
+    return;
+  }
 
   // Re-grant SHARED so this read doesn't re-fire stale on every call.
   deps.registry.grantShared(artifactId, agentId, nowTick, "post_stale_read");

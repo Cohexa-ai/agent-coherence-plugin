@@ -9,12 +9,18 @@
  */
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { ArtifactRegistry } from "../registry.js";
-import type { TrackedArtifactPolicy } from "../policy.js";
+import type { PolicyRef } from "../policy.js";
 import type { SessionRegistry } from "../sessions.js";
+import { isValidSubagentId } from "../agent_id.js";
 
 export interface HookDeps {
   registry: ArtifactRegistry;
-  policy: TrackedArtifactPolicy;
+  /**
+   * Mutable policy holder (zero-Python Unit 1/2): handlers must read the
+   * policy THROUGH this ref (`deps.policy.isTracked(...)`) so a
+   * /policy/track|untrack reload is visible without a restart.
+   */
+  policy: PolicyRef;
   sessions: SessionRegistry;
 }
 
@@ -110,6 +116,40 @@ export async function readJsonBody(
 
 const SESSION_ID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
 const CONTENT_HASH_RE = /^[0-9a-fA-F]{64}$/;
+
+/** Raw subagent-id value from the body, snake_case preferred (SB-25). */
+function rawSubagentIdValue(body: Record<string, unknown>): unknown {
+  return body.agent_id !== undefined ? body.agent_id : body.agentId;
+}
+
+/**
+ * SB-25: optional subagent identity from the hook request body. Accepts the
+ * documented snake_case `agent_id` with a defensive camelCase `agentId`
+ * fallback (wire casing pinned by the R6 live capture). Additive +
+ * backward-compatible: absent/invalid resolves to null (the parent
+ * identity), never a 400. Mirrors Python `read_subagent_id`.
+ */
+export function readSubagentId(body: Record<string, unknown>): string | null {
+  const raw = rawSubagentIdValue(body);
+  return isValidSubagentId(raw) ? raw : null;
+}
+
+/**
+ * True iff the body carries a NON-EMPTY subagent-id value, regardless of
+ * whether it passes `isValidSubagentId`. Lets the destructive session-stop
+ * path distinguish "no agent_id → legitimate parent stop" from "present but
+ * malformed → refuse, never degrade to releasing the parent's grants" (the
+ * P1 subagent-stop safety fix). Read paths don't need this — a malformed id
+ * degrading to parent attribution there is benign.
+ */
+export function hasSubagentIdField(body: Record<string, unknown>): boolean {
+  const raw = rawSubagentIdValue(body);
+  // Any present, non-null, non-empty value of ANY type counts as "present" —
+  // a present `agent_id: 42` must be REFUSED on session-stop, not treated as
+  // absent and degraded to the parent identity. Parity with Python
+  // has_subagent_id_field.
+  return raw !== undefined && raw !== null && raw !== "";
+}
 
 export function isValidSessionId(s: unknown): s is string {
   return typeof s === "string" && SESSION_ID_RE.test(s);

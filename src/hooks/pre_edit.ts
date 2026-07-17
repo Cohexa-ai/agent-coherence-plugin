@@ -17,10 +17,13 @@
  * the victim will see on their next hook.
  */
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { MESIState } from "../states.js";
 import {
   buildCollisionResponse,
+  emitStrictDeny,
   nowUnix,
   preemptionNoticeText,
+  type StaleSummary,
 } from "../hook_payloads.js";
 import {
   type HookDeps,
@@ -29,6 +32,7 @@ import {
   readJsonBody,
   isValidSessionId,
   isValidPath,
+  readSubagentId,
 } from "./_common.js";
 
 export type PreEditDeps = HookDeps;
@@ -59,7 +63,7 @@ export async function handlePreEdit(
     return;
   }
 
-  const agentId = deps.sessions.registerSession(sessionId);
+  const agentId = deps.sessions.registerSession(sessionId, readSubagentId(body as Record<string, unknown>));
   const nowTick = Math.floor(Date.now() / 1000);
 
   // Resolve-or-seed the artifact. Empty content_hash sentinel matches Python:
@@ -70,6 +74,37 @@ export async function handlePreEdit(
     artifactId = deps.registry.resolveOrRegisterArtifact(path, "");
   } else {
     artifactId = existing.id;
+  }
+
+  // v0.2 KTD-Q strict-mode deny gate — Edit/Write surface (Unit 6, mirrors
+  // Python pre-edit). INVALID-only: pre-edit carries no content_hash, so the
+  // hash_differs disambiguation is unavailable; a first-time editor (state
+  // None) falls through to the normal acquire flow. Fires only after this
+  // session has been explicitly preempted.
+  if (existing !== null && deps.policy.isStrictMode(path)) {
+    const editorState = deps.registry.getAgentState(artifactId, agentId);
+    if (existing.version > 0 && editorState === MESIState.INVALID) {
+      const lastWriterSession =
+        existing.last_writer_id !== null
+          ? deps.sessions.agentIdToSessionId(existing.last_writer_id)
+          : null;
+      const summary: StaleSummary = {
+        path,
+        current_version: existing.version,
+        prior_version_seen_by_session: existing.version - 1,
+        last_writer_session_id: lastWriterSession ?? "<unknown>",
+        last_writer_at_unix_ts: existing.updated_at,
+        warning_generated_at_unix_ts: nowUnix(),
+        hash_differs: false, // pre-edit doesn't carry content_hash
+      };
+      writeJson(res, 200, {
+        ok: false,
+        hookSpecificOutput: emitStrictDeny({ source: "pre_edit_strict_deny", summary }),
+        status: "stale",
+        summary,
+      });
+      return;
+    }
   }
 
   // Collision detection: snapshot exclusive holder BEFORE acquireExclusive

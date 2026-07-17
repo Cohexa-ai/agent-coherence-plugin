@@ -21,13 +21,17 @@
 import { createServer as createHttpServer, type IncomingMessage, type ServerResponse, type Server } from "node:http";
 import { verifyBearer, verifyHost } from "./auth.js";
 import type { ArtifactRegistry } from "./registry.js";
-import type { TrackedArtifactPolicy, PolicySummary } from "./policy.js";
+import type { PolicyRef, PolicySummary } from "./policy.js";
 import type { SessionRegistry } from "./sessions.js";
 import { writeJson, writeError } from "./hooks/_common.js";
 import { preReadRoute } from "./hooks/pre_read.js";
 import { preEditRoute } from "./hooks/pre_edit.js";
 import { postEditRoute } from "./hooks/post_edit.js";
 import { sessionStopRoute } from "./hooks/session_stop.js";
+import { preBashRoute } from "./hooks/pre_bash.js";
+import { preGrepRoute } from "./hooks/pre_grep.js";
+import { postEditCasRoute } from "./hooks/post_edit_cas.js";
+import { policyTrackRoute, policyUntrackRoute } from "./hooks/policy_routes.js";
 
 /** R21: per KTD-B.2 security-parity corpus + v0.1.1 plan KTD-K. */
 export const MAX_REQUEST_BODY_BYTES = 64 * 1024;
@@ -44,8 +48,8 @@ export interface ServerOptions {
   version: string;
   /** SQLite registry handle; surfaces stats in /status default tier. */
   registry: ArtifactRegistry;
-  /** Tracked-artifact policy; surfaces summary in /status default tier. */
-  policy: TrackedArtifactPolicy;
+  /** Mutable tracked-artifact policy holder; handlers read through it (Unit 2). */
+  policy: PolicyRef;
   /** In-memory session_id ↔ agent_id map for hook handlers. */
   sessions: SessionRegistry;
 }
@@ -288,6 +292,27 @@ export function createServer(options: ServerOptions): Server {
       }
       if (path === "/hooks/session-stop") {
         sessionStopRoute(req, res, hookDeps, MAX_REQUEST_BODY_BYTES).catch(handle500);
+        return;
+      }
+      // Zero-Python Unit 2 routes (Python coordinator parity).
+      if (path === "/hooks/pre-bash") {
+        preBashRoute(req, res, hookDeps, MAX_REQUEST_BODY_BYTES).catch(handle500);
+        return;
+      }
+      if (path === "/hooks/pre-grep") {
+        preGrepRoute(req, res, hookDeps, MAX_REQUEST_BODY_BYTES).catch(handle500);
+        return;
+      }
+      if (path === "/hooks/post-edit-cas") {
+        postEditCasRoute(req, res, hookDeps, MAX_REQUEST_BODY_BYTES).catch(handle500);
+        return;
+      }
+      if (path === "/policy/track") {
+        policyTrackRoute(req, res, hookDeps, MAX_REQUEST_BODY_BYTES).catch(handle500);
+        return;
+      }
+      if (path === "/policy/untrack") {
+        policyUntrackRoute(req, res, hookDeps, MAX_REQUEST_BODY_BYTES).catch(handle500);
         return;
       }
       writeError(res, 404, "not found");

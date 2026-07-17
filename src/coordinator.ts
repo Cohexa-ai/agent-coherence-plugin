@@ -25,7 +25,7 @@ import { hostname } from "node:os";
 import { ensureSecret } from "./auth.js";
 import { createServer, BIND_HOST } from "./server.js";
 import { ArtifactRegistry } from "./registry.js";
-import { TrackedArtifactPolicy } from "./policy.js";
+import { PolicyRef } from "./policy.js";
 import { SessionRegistry } from "./sessions.js";
 
 // Kept in sync manually with package.json/.claude-plugin/{plugin,marketplace}.json.
@@ -102,7 +102,7 @@ async function main(): Promise<void> {
       `migrations_applied=${registry.getStats().migrationsApplied})`,
   );
 
-  const policy = TrackedArtifactPolicy.load(workspace.root);
+  const policy = PolicyRef.load(workspace.root);
   const policySummary = policy.summary();
   logInfo(
     `policy loaded (defaults=${policySummary.default_pattern_count}, ` +

@@ -1,5 +1,5 @@
 {
-  "_comment": "Probe 2B fallback — command-type hooks that bypass $COHERENCE_PORT env propagation entirely. Each hook invokes the agent-coherence-hook-client console script which reads <workspace>/.coherence/server.pid for the port and hook.secret for the Bearer token, then makes the HTTP POST. Use only if Phase E.0 probe 2A demonstrates $CLAUDE_ENV_FILE propagation is unreliable on the target claude version. See docs/probes/2026-05-17-phase-e0-probe-procedure.md.",
+  "_comment": "Zero-Python Unit 5: all hook commands route through bin/hook-client (Node client preferred - no node_modules needed; Python client fallback; '{}' floor) and SessionStart routes through bin/ensure-coordinator-dispatch (coordinator_backend selection: env > .coherence/coordinator_backend > python default). Command-type hooks per Phase E.0 probe 2A: CC's schema validator rejects env-var URLs, so HTTP-type hooks are structurally infeasible; the client reads .coherence/server.pid itself.",
   "hooks": {
     "PreToolUse": [
       {
@@ -7,7 +7,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "agent-coherence-hook-client pre-read"
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/hook-client\" pre-read"
           }
         ]
       },
@@ -16,27 +16,27 @@
         "hooks": [
           {
             "type": "command",
-            "command": "agent-coherence-hook-client pre-edit"
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/hook-client\" pre-edit"
           }
         ]
       },
       {
-        "_comment": "KTD-N H4 mitigation — the model routes around a denied/warned Read via `bash cat plan.md`. Without a Bash PreToolUse matcher, that routing pattern silently bypasses the stale-read warning surface, leaving the plugin's coherence guarantee intact only for the literal Read tool. The pre-bash client subcommand extracts tracked-artifact paths from the Bash command string and forwards them to /hooks/pre-bash on the coordinator.",
+        "_comment": "KTD-N H4 mitigation \u2014 the model routes around a denied/warned Read via `bash cat plan.md`. Without a Bash PreToolUse matcher, that routing pattern silently bypasses the stale-read warning surface, leaving the plugin's coherence guarantee intact only for the literal Read tool. The pre-bash client subcommand extracts tracked-artifact paths from the Bash command string and forwards them to /hooks/pre-bash on the coordinator.",
         "matcher": "Bash",
         "hooks": [
           {
             "type": "command",
-            "command": "agent-coherence-hook-client pre-bash"
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/hook-client\" pre-bash"
           }
         ]
       },
       {
-        "_comment": "KTD-N H4 mitigation — Grep is another bypass route: a user-initiated or model-initiated grep over a directory containing tracked artifacts (CLAUDE.md, plan.md, etc.) should surface stale-read warnings for artifacts the session hasn't freshened since peer commits. The pre-grep client subcommand extracts the search root and forwards to /hooks/pre-grep on the coordinator, which enumerates registry-known tracked artifacts under the prefix.",
+        "_comment": "KTD-N H4 mitigation \u2014 Grep is another bypass route: a user-initiated or model-initiated grep over a directory containing tracked artifacts (CLAUDE.md, plan.md, etc.) should surface stale-read warnings for artifacts the session hasn't freshened since peer commits. The pre-grep client subcommand extracts the search root and forwards to /hooks/pre-grep on the coordinator, which enumerates registry-known tracked artifacts under the prefix.",
         "matcher": "Grep",
         "hooks": [
           {
             "type": "command",
-            "command": "agent-coherence-hook-client pre-grep"
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/hook-client\" pre-grep"
           }
         ]
       }
@@ -47,7 +47,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "agent-coherence-hook-client post-edit"
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/hook-client\" post-edit"
           }
         ]
       }
@@ -57,7 +57,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/bin/ensure-coordinator"
+            "command": "${CLAUDE_PLUGIN_ROOT}/bin/ensure-coordinator-dispatch"
           }
         ]
       }
@@ -67,7 +67,18 @@
         "hooks": [
           {
             "type": "command",
-            "command": "agent-coherence-hook-client session-stop"
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/hook-client\" session-stop"
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "_comment": "SB-25 Unit 4: release the SUBAGENT identity's uncommitted grants when it stops. The subcommand requires the payload's agent_id (validated against the subagent-id charset) - absent OR malformed means no-op {}, never a parent release. Backstop: the Python coordinator's heartbeat/idle sweep reclaims a grant if SubagentStop is missed; the Node coordinator has no sweep yet, so on the Node backend a missed SubagentStop holds the grant until coordinator restart (tracked follow-up).",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/hook-client\" subagent-stop"
           }
         ]
       }

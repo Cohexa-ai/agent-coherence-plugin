@@ -30,8 +30,112 @@ export interface StaleSummary {
 export interface HookSpecificOutput {
   hookEventName: "PreToolUse";
   permissionDecision: "allow" | "deny" | "ask";
-  additionalContext: string;
+  /**
+   * OPTIONAL (Unit 6 review correction): Python's `emit_strict_deny` returns
+   * NO `additionalContext` key at all, and `emit_allow` includes it only
+   * when non-None. Byte-parity requires OMITTING the key, not sending "".
+   */
+  additionalContext?: string;
   permissionDecisionReason?: string;
+}
+
+// ----------------------------------------------------------------------
+// v0.2 strict-mode emitters — Node port of Python hook_payloads.py
+// (KTD-P static deny text · KTD-U terminal denial) — zero-Python Unit 6
+// ----------------------------------------------------------------------
+
+/**
+ * KTD-U security invariant: denial classes that must NEVER be converted to
+ * `permissionDecision: "allow"`. `emitAllow` throws on membership.
+ */
+export const TERMINAL_DENIAL_CLASSES: ReadonlySet<string> = new Set([
+  "permissions_deny_strict_mode",
+]);
+
+/**
+ * KTD-P static deny text — BYTE-IDENTICAL to the Python
+ * `STRICT_MODE_DENY_REASON_TEMPLATE`. Phase 0 H1 proved varied deny text
+ * WORSENS opus retry behavior (5 retries vs 2); every substitution is
+ * deterministic per-artifact / per-preempter / per-commit-tick. Do not
+ * reword, respace, or add fields.
+ */
+export const STRICT_MODE_DENY_REASON_TEMPLATE =
+  "Stale read denied: {path} was updated by session {last_writer_short} " +
+  "at {last_writer_ts_iso}. Re-read {path} via the Read tool before " +
+  "proceeding. This denial is structural (v0.2 strict mode); retrying " +
+  "the same operation will produce the same denial.";
+
+/**
+ * Python `datetime.fromtimestamp(ts, tz=utc).isoformat()` semantics —
+ * NOT `Date.toISOString()` (which emits `Z` + fixed 3-digit ms and would
+ * byte-diverge on every fractional timestamp; plan review finding):
+ * - offset rendered as `+00:00`
+ * - microsecond precision, 6 digits zero-padded, OMITTED entirely when the
+ *   fractional part rounds to 0.
+ */
+export function pythonIsoUtc(unixSeconds: number): string {
+  const totalMicros = Math.round(unixSeconds * 1e6);
+  const micros = ((totalMicros % 1_000_000) + 1_000_000) % 1_000_000;
+  const seconds = (totalMicros - micros) / 1_000_000;
+  const d = new Date(seconds * 1000);
+  const pad = (n: number, w: number) => String(n).padStart(w, "0");
+  const base =
+    `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1, 2)}-${pad(d.getUTCDate(), 2)}` +
+    `T${pad(d.getUTCHours(), 2)}:${pad(d.getUTCMinutes(), 2)}:${pad(d.getUTCSeconds(), 2)}`;
+  return micros === 0 ? `${base}+00:00` : `${base}.${pad(micros, 6)}+00:00`;
+}
+
+/**
+ * Build the allow envelope. ALL allow emissions route through here so the
+ * KTD-U invariant is structurally enforced: converting a terminal-class
+ * denial back to allow throws (mirrors Python's AssertionError).
+ */
+export function emitAllow(args: {
+  source: string;
+  additionalContext?: string | null;
+  denialClass?: string | null;
+}): HookSpecificOutput {
+  if (args.denialClass != null && TERMINAL_DENIAL_CLASSES.has(args.denialClass)) {
+    throw new Error(
+      `emitAllow(source=${args.source}, denialClass=${args.denialClass}): ` +
+        `refused to convert TERMINAL_DENIAL_CLASSES member to allow. ` +
+        `This is the KTD-U security invariant — strict-mode denials are structurally terminal.`,
+    );
+  }
+  const out: HookSpecificOutput = {
+    hookEventName: "PreToolUse",
+    permissionDecision: "allow",
+  };
+  if (args.additionalContext != null) out.additionalContext = args.additionalContext;
+  return out;
+}
+
+/**
+ * Build the strict-mode deny envelope — byte-parity with Python
+ * `emit_strict_deny`:
+ * - null/absent last_writer → the literal `<unknown>`;
+ * - a `<…>` sentinel is preserved VERBATIM (a naive [:8] slice would emit
+ *   `<unknown` — the plan-review finding);
+ * - otherwise the 8-char short form;
+ * - timestamp via `pythonIsoUtc` (never toISOString);
+ * - NO additionalContext key.
+ * The `source` arg is kept for call-site telemetry parity with Python.
+ */
+export function emitStrictDeny(args: { source: string; summary: StaleSummary }): HookSpecificOutput {
+  const lastWriterFull = args.summary.last_writer_session_id || "<unknown>";
+  const lastWriterShort =
+    lastWriterFull.startsWith("<") && lastWriterFull.endsWith(">")
+      ? lastWriterFull
+      : lastWriterFull.slice(0, 8);
+  const lastWriterTsIso = pythonIsoUtc(args.summary.last_writer_at_unix_ts);
+  const reason = STRICT_MODE_DENY_REASON_TEMPLATE.replaceAll("{path}", args.summary.path)
+    .replace("{last_writer_short}", lastWriterShort)
+    .replace("{last_writer_ts_iso}", lastWriterTsIso);
+  return {
+    hookEventName: "PreToolUse",
+    permissionDecision: "deny",
+    permissionDecisionReason: reason,
+  };
 }
 
 export interface StaleResponse {

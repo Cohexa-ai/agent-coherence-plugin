@@ -165,7 +165,7 @@ For tool-class restrictions (`grep` → `rg`, no `python -c`, no `sudo`), the st
 agent-coherence-migrate-deny --workspace . | jq
 ```
 
-**Strict mode is Python-coordinator-only in v0.2.** Workspaces using the Node coordinator (via `coherence.coordinator_backend = "node"`) stay warn-mode. v0.3 brings the strict-mode wire shape to the Node coordinator behind the multi-target converter plan.
+**Strict mode works on both coordinator backends.** The Node coordinator now enforces strict-mode denies at byte-parity with Python (guarded by the `protocol_corpus` strict-mode fixtures), so a Node-backend workspace honors `.coherence/strict_mode.yaml` the same way. Select the backend per §[Coordinator backends](#architecture) below.
 
 ## Configuration
 
@@ -196,8 +196,16 @@ Two processes:
 
 Two coordinator backends:
 
-- **Python** — canonical, full feature set. Ships in the `agent-coherence` library on PyPI. Has v0.2 strict mode.
-- **Node** — MESI subset for one-click marketplace install. Ships in this plugin's `dist/`. Warn-mode only in v0.2.
+- **Python** — canonical, richest feature set. Ships in the `agent-coherence` library on PyPI.
+- **Node** — self-sufficient (needs **no Python**): all six hooks, the track/untrack/status CLIs, and strict mode, all at wire-parity with Python. Ships in this plugin's `dist/`.
+
+**Selecting the backend.** The default is `python`. To use the Node backend for a workspace, either set the env var `COHERENCE_COORDINATOR_BACKEND=node`, or write the single word `node` to `<repo>/.coherence/coordinator_backend`:
+
+```bash
+mkdir -p .coherence && printf 'node\n' > .coherence/coordinator_backend
+```
+
+The env var takes precedence; an unknown value falls back to `python`. (This file — not a Claude Code plugin setting — is the selection mechanism; the Node zero-Python guarantee is scoped to the platforms with a prebuilt `better-sqlite3` for the pinned Node ABI range. The floor is **Node 20** — `better-sqlite3` dropped Node 18 — so `engines.node` is `>=20 <25`; on Node 18 the plugin still runs on the Python backend, or on Node with a local toolchain to compile `better-sqlite3`.)
 
 Both backends speak the same HTTP wire contract; the [`tests/protocol_corpus/`](https://github.com/hipvlady/agent-coherence/tree/main/tests/protocol_corpus) suite in the library repo catches drift. Switch backends safely via `agent-coherence-coordinator --prepare-for-migration`. The canonical design lives in the library's `docs/plans/` directory.
 
@@ -278,7 +286,7 @@ The plugin-shipped path requires a Claude Code platform change — tracked in [a
 | Issue | Impact | When it matters |
 |---|---|---|
 | Native Windows not supported | `fcntl` lock primitive is POSIX-only | Use WSL2 on Windows. v0.2.x ships an `os.O_EXCL` fallback. |
-| Strict mode requires Python coordinator backend | Node coordinator stays warn-mode in v0.2 | Set `coherence.coordinator_backend = "python"` in plugin settings for any workspace using `strict_mode.yaml`. v0.3 brings strict mode to Node. |
+| `agent-coherence-migrate-deny` needs Python | The `permissions.deny` suggestion helper is not part of the zero-Python Node surface | Install `agent-coherence` (Python) to run the migrate-deny helper, or hand-write the `permissions.deny` rules. All runtime hooks + strict mode work without Python on the Node backend. |
 | Hot `hook.secret` rotation not supported | v0.2 ships stop-rotate-restart procedure | If the secret is compromised, follow the troubleshooting row above. v0.2.x will add hot rotation. |
 | Bypass class: interpreters not in detector list | `ruby -e`, `node -e`, `perl -pe < file` can read tracked-strict artifacts | Operator-supplied `permissions.deny` rule per language. The `bash_path_detector` is intentionally curated; obfuscated bypass is documented as out-of-scope. |
 | Bypass class: shell-redirect reads | `tee /dev/null < tracked.md` reads the file but isn't a `cat tracked.md` invocation | **NOT closed by `permissions.deny`** (no platform syntax for shell-redirect file arguments). Terminal limitation. |
