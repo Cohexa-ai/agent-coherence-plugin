@@ -176,12 +176,16 @@ test("P1: session-stop with a present-but-MALFORMED agent_id must NOT release th
     const acq = await post("/hooks/pre-edit", { session_id: SID, path: "CLAUDE.md" });
     assert.equal(acq.ok, true);
 
-    // A subagent-stop arrives carrying a non-empty but shape-invalid agent_id
-    // (what buildSubagentStop now blocks client-side, but the server must ALSO
-    // fail closed as defense-in-depth). It must be a no-op, NOT a parent release.
-    const stop = await post("/hooks/session-stop", { session_id: SID, agent_id: "bad.id" });
-    assert.equal(stop.ok, true);
-    assert.deepEqual(stop.released_artifacts, []);
+    // A session-stop arrives carrying a present-but-invalid agent_id (what
+    // buildSubagentStop blocks client-side, but the server must ALSO fail
+    // closed as defense-in-depth). Every present malformed JSON type — invalid
+    // string AND non-string (number/array/object/bool) — must be a no-op, NOT a
+    // parent release. Parity with Python has_subagent_id_field.
+    for (const bad of ["bad.id", "x".repeat(65), 42, [1], { k: 1 }, true]) {
+      const stop = await post("/hooks/session-stop", { session_id: SID, agent_id: bad });
+      assert.equal(stop.ok, true);
+      assert.deepEqual(stop.released_artifacts, [], `malformed ${JSON.stringify(bad)} must be a no-op`);
+    }
 
     // Proof the parent's grant SURVIVED the malformed stop: a subsequent
     // legitimate parent stop (absent agent_id) can still release it. Had the

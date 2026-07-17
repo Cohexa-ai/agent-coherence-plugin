@@ -144,7 +144,11 @@ export function readSubagentId(body: Record<string, unknown>): string | null {
  */
 export function hasSubagentIdField(body: Record<string, unknown>): boolean {
   const raw = rawSubagentIdValue(body);
-  return typeof raw === "string" && raw !== "";
+  // Any present, non-null, non-empty value of ANY type counts as "present" —
+  // a present `agent_id: 42` must be REFUSED on session-stop, not treated as
+  // absent and degraded to the parent identity. Parity with Python
+  // has_subagent_id_field.
+  return raw !== undefined && raw !== null && raw !== "";
 }
 
 export function isValidSessionId(s: unknown): s is string {
