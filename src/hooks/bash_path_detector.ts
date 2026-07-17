@@ -34,7 +34,9 @@ const EVAL_INTERPRETERS = new Set(["python", "python3", "perl", "ruby"]);
 // dot-free command (within MAX_COMMAND_LENGTH) drives near-quadratic
 // backtracking that blocks the single-threaded coordinator's event loop for
 // every session in the workspace (ReDoS). See security review 2026-07-16.
-const PATHLIKE_RE = /(?<![A-Za-z0-9_/.\-])[A-Za-z0-9_./-]+\.[A-Za-z0-9]+/g;
+// (The trailing `-` is literal in both classes — same character set as Python's
+// `[A-Za-z0-9_/.\-]`; unescaped here to match the main class + satisfy no-useless-escape.)
+const PATHLIKE_RE = /(?<![A-Za-z0-9_/.-])[A-Za-z0-9_./-]+\.[A-Za-z0-9]+/g;
 const ENV_ASSIGN_RE = /^[A-Za-z_][A-Za-z0-9_]*=/;
 
 /** Quote-aware tokenizer (shlex-lite): honors '...'/"..." grouping + backslash escapes. */

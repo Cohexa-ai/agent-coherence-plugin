@@ -37,6 +37,13 @@ export default [
         { argsIgnorePattern: '^_', varsIgnorePattern: '^_' },
       ],
       '@typescript-eslint/no-explicit-any': 'off',
+      // Core ESLint rules that don't understand TypeScript. Per typescript-eslint's
+      // documented guidance, tsc already reports these far more accurately, and the
+      // core rules produce false positives on TS-only constructs:
+      //   no-undef     — type-only globals (`NodeJS.ProcessEnv`) look undefined
+      //   no-redeclare — enum + namespace declaration merging (states.ts MESIState)
+      'no-undef': 'off',
+      'no-redeclare': 'off',
     },
   },
 ];

@@ -2,8 +2,8 @@
 
 This document covers the threat model, network posture, auth, storage hygiene,
 supply-chain controls, and disclosure channel for the **`agent-coherence` Claude
-Code plugin** (this repo: `hipvlady/agent-coherence-plugin`). The underlying
-Python library `hipvlady/agent-coherence` has its own `SECURITY.md`; the two
+Code plugin** (this repo: `Cohexa-ai/agent-coherence-plugin`). The underlying
+Python library `Cohexa-ai/agent-coherence` has its own `SECURITY.md`; the two
 documents share the bearer-token + Host-header auth design but diverge on
 distribution surface (Claude Code plugin marketplace vs. PyPI).
 
@@ -141,7 +141,7 @@ across releases to see dependency-graph changes.
 
 Release tag pushes trigger `release.yml`, which builds from the tag commit
 and attaches the SBOM + the built artefacts. The workflow runs in
-`hipvlady/agent-coherence-plugin`'s GitHub Actions environment; provenance
+`Cohexa-ai/agent-coherence-plugin`'s GitHub Actions environment; provenance
 is implicit via the workflow run URL recorded on the release page.
 
 GitHub-native attestation (cosign / Sigstore) is tracked for v0.2 — the
@@ -154,7 +154,7 @@ The plugin requires `agent-coherence >= 0.8.0` on PyPI for the
 `agent-coherence-coordinator` and `agent-coherence-hook-client` console
 scripts (when running the Python coordinator backend). The Python
 library's supply-chain controls are documented at
-[hipvlady/agent-coherence — SECURITY.md](https://github.com/hipvlady/agent-coherence/blob/main/SECURITY.md):
+[Cohexa-ai/agent-coherence — SECURITY.md](https://github.com/Cohexa-ai/agent-coherence/blob/main/SECURITY.md):
 PyPI Trusted Publishers via OIDC (no static token to steal), PEP 740
 attestations, CycloneDX SBOM, hash-pinned install.
 
@@ -169,7 +169,7 @@ Report security issues via either of:
 
 1. **Preferred — private vulnerability report**: GitHub's "Report a
    vulnerability" feature on
-   [hipvlady/agent-coherence-plugin/security](https://github.com/hipvlady/agent-coherence-plugin/security).
+   [Cohexa-ai/agent-coherence-plugin/security](https://github.com/Cohexa-ai/agent-coherence-plugin/security).
    Private disclosure channel, not visible to the public.
 2. **Email**: `security@agent-coherence.dev`. Forwards to the
    maintainer's inbox; the alias exists specifically so security

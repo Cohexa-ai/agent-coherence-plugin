@@ -29,6 +29,6 @@ If you have a sense, indicate how big you think this is:
 
 **Triage**
 
-Feature requests have no SLA. The maintainer reviews them at irregular intervals; large ones may end up in [GitHub Discussions](https://github.com/hipvlady/agent-coherence-plugin/discussions) for collaborative scoping before becoming a tracked issue. If you'd like to talk through a feature before formalizing it, opening a Discussion is the lower-friction path.
+Feature requests have no SLA. The maintainer reviews them at irregular intervals; large ones may end up in [GitHub Discussions](https://github.com/Cohexa-ai/agent-coherence-plugin/discussions) for collaborative scoping before becoming a tracked issue. If you'd like to talk through a feature before formalizing it, opening a Discussion is the lower-friction path.
 
 For multi-target install paths (Cursor, Codex, Copilot, etc.), see the v0.3 multi-target plan reference in the [README](../../README.md#install) — that work is tracked separately.
