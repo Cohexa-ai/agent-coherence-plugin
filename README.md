@@ -187,6 +187,8 @@ A Claude Code subagent (spawned via the Task tool) runs under its **parent's** `
 
 This is **additive and fail-open**: if a hook payload carries no `agent_id`, the identity resolves to the parent exactly as before — nothing regresses for main-thread or single-session work. It is enforced identically on both coordinator backends.
 
+**Verified against Claude Code v2.1.211** (2026-07-17 live capture): a subagent's `PreToolUse` payload carries `agent_id` (snake_case) — e.g. `"agent_id": "abd7e2b3442d77958"`, which satisfies the coordinator's `^[A-Za-z0-9_-]{1,64}$` validator — plus `agent_type`; main-thread tool calls omit `agent_id`; and `SubagentStop` fires carrying the same `agent_id`, so the scoped release targets exactly that subagent's grants.
+
 ## Configuration
 
 The coordinator creates `.coherence/` at your repo root automatically. Inside it:
