@@ -1,7 +1,7 @@
 {
   "name": "agent-coherence-plugin-coordinator",
   "version": "0.2.2",
-  "description": "Node coordinator for the agent-coherence Claude Code plugin \u2014 MESI-subset port of the Python coordinator for one-click marketplace install. Coexists with the Python coordinator per coherence.coordinator_backend setting.",
+  "description": "Node coordinator for the agent-coherence Claude Code plugin — MESI-subset port of the Python coordinator for one-click marketplace install. Coexists with the Python coordinator per coherence.coordinator_backend setting.",
   "private": true,
   "type": "module",
   "main": "dist/coordinator.js",
@@ -23,8 +23,8 @@
     "@types/js-yaml": "^4.0.9",
     "@types/uuid": "^11.0.0",
     "better-sqlite3": "^12.11.1",
-    "js-yaml": "^4.2.0",
-    "uuid": "^14.0.0"
+    "js-yaml": "^4.3.0",
+    "uuid": "^14.0.1"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.4",
@@ -32,8 +32,8 @@
     "@types/node": "^26.1.1",
     "@typescript-eslint/eslint-plugin": "^8.63.0",
     "@typescript-eslint/parser": "^8.60.1",
-    "eslint": "^10.5.0",
-    "globals": "^17.6.0",
+    "eslint": "^10.7.0",
+    "globals": "^17.7.0",
     "prettier": "^3.9.5",
     "typescript": "^6.0.3"
   },
