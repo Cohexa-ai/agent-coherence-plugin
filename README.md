@@ -1,7 +1,7 @@
 # agent-coherence (Claude Code plugin)
 
-[![CI](https://github.com/hipvlady/agent-coherence-plugin/actions/workflows/ci.yml/badge.svg)](https://github.com/hipvlady/agent-coherence-plugin/actions/workflows/ci.yml)
-[![Release](https://img.shields.io/github/v/release/hipvlady/agent-coherence-plugin)](https://github.com/hipvlady/agent-coherence-plugin/releases)
+[![CI](https://github.com/Cohexa-ai/agent-coherence-plugin/actions/workflows/ci.yml/badge.svg)](https://github.com/Cohexa-ai/agent-coherence-plugin/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/Cohexa-ai/agent-coherence-plugin)](https://github.com/Cohexa-ai/agent-coherence-plugin/releases)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![Library](https://img.shields.io/pypi/v/agent-coherence?label=agent-coherence)](https://pypi.org/project/agent-coherence/)
 
@@ -103,11 +103,11 @@ First-time experience: on your first Read of a tracked file in a workspace, you'
 ### Claude Code
 
 ```text
-/plugin marketplace add hipvlady/agent-coherence-plugin
+/plugin marketplace add Cohexa-ai/agent-coherence-plugin
 /plugin install agent-coherence@agent-coherence
 ```
 
-The marketplace add resolves to the latest published release. To pin a specific version: `/plugin marketplace add hipvlady/agent-coherence-plugin@v0.2.2`.
+The marketplace add resolves to the latest published release. To pin a specific version: `/plugin marketplace add Cohexa-ai/agent-coherence-plugin@v0.2.2`.
 
 **Two backends, two install paths — pick one:**
 
@@ -136,7 +136,7 @@ After install, restart any running `claude` sessions in your workspace so the ne
 > (the earlier `0.7.x` line was the LangGraph/CrewAI/AutoGen drop-in only). v0.2
 > strict mode requires `agent-coherence>=0.8.2`; warn-mode (the
 > default) works against `>=0.8.0`. Release page:
-> [hipvlady/agent-coherence](https://github.com/hipvlady/agent-coherence/releases).
+> [Cohexa-ai/agent-coherence](https://github.com/Cohexa-ai/agent-coherence/releases).
 
 ### Other targets (Cursor, Codex, Copilot, etc.)
 
@@ -229,12 +229,12 @@ mkdir -p .coherence && printf 'node\n' > .coherence/coordinator_backend
 
 The env var takes precedence; an unknown value falls back to `python`. (This file — not a Claude Code plugin setting — is the selection mechanism; the Node zero-Python guarantee is scoped to the platforms with a prebuilt `better-sqlite3` for the pinned Node ABI range. The floor is **Node 20** — `better-sqlite3` dropped Node 18 — so `engines.node` is `>=20 <25`; on Node 18 the plugin still runs on the Python backend, or on Node with a local toolchain to compile `better-sqlite3`.)
 
-Both backends speak the same HTTP wire contract; the [`tests/protocol_corpus/`](https://github.com/hipvlady/agent-coherence/tree/main/tests/protocol_corpus) suite in the library repo catches drift. Switch backends safely via `agent-coherence-coordinator --prepare-for-migration`. The canonical design lives in the library's `docs/plans/` directory.
+Both backends speak the same HTTP wire contract; the [`tests/protocol_corpus/`](https://github.com/Cohexa-ai/agent-coherence/tree/main/tests/protocol_corpus) suite in the library repo catches drift. Switch backends safely via `agent-coherence-coordinator --prepare-for-migration`. The canonical design lives in the library's `docs/plans/` directory.
 
 ## Local development
 
 ```bash
-git clone https://github.com/hipvlady/agent-coherence-plugin
+git clone https://github.com/Cohexa-ai/agent-coherence-plugin
 cd agent-coherence-plugin
 npm ci
 npm run build
@@ -358,18 +358,18 @@ See the [Commands](#commands) table above. Slash commands shell out to the corre
 
 ### How do I report a security issue?
 
-See [SECURITY.md](SECURITY.md). Preferred channel is GitHub's "Report a vulnerability" feature on the [security tab](https://github.com/hipvlady/agent-coherence-plugin/security); fallback is `security@agent-coherence.dev`. 72h response-time SLA.
+See [SECURITY.md](SECURITY.md). Preferred channel is GitHub's "Report a vulnerability" feature on the [security tab](https://github.com/Cohexa-ai/agent-coherence-plugin/security); fallback is `security@agent-coherence.dev`. 72h response-time SLA.
 
 ### Where is release history?
 
-[GitHub Releases](https://github.com/hipvlady/agent-coherence-plugin/releases) is the canonical surface. [CHANGELOG.md](CHANGELOG.md) at the repo root mirrors it in Keep-a-Changelog format.
+[GitHub Releases](https://github.com/Cohexa-ai/agent-coherence-plugin/releases) is the canonical surface. [CHANGELOG.md](CHANGELOG.md) at the repo root mirrors it in Keep-a-Changelog format.
 
 ## About Contributions
 
 PRs are welcome. The posture is **maintainer-curated**, not auto-merge:
 
 - Bug reports + reproductions: 72h triage SLA. Use the [bug report template](.github/ISSUE_TEMPLATE/bug_report.md).
-- Feature requests: no SLA. Use the [feature request template](.github/ISSUE_TEMPLATE/feature_request.md) or open a [GitHub Discussion](https://github.com/hipvlady/agent-coherence-plugin/discussions) to talk it through first.
+- Feature requests: no SLA. Use the [feature request template](.github/ISSUE_TEMPLATE/feature_request.md) or open a [GitHub Discussion](https://github.com/Cohexa-ai/agent-coherence-plugin/discussions) to talk it through first.
 - Install-troubleshooting questions: use the [install-troubleshooting template](.github/ISSUE_TEMPLATE/install_troubleshooting.md) — it asks for the diagnostic info that lets the maintainer repro in <5 min.
 - PRs: reviewed via `gh pr view` + Claude-assisted review (mirror of the workflow this repo uses on its own changes). Expect 1-3 review cycles before merge; never auto-merged. Include tests for new behavior, update tests for changed behavior.
 
@@ -377,7 +377,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for the pre-PR checklist + branching conv
 
 ## Release
 
-Releases follow [SemVer 2.0](https://semver.org/spec/v2.0.0.html); the canonical version-tag history is in [CHANGELOG.md](CHANGELOG.md). See [GitHub Releases](https://github.com/hipvlady/agent-coherence-plugin/releases) for tagged artifacts.
+Releases follow [SemVer 2.0](https://semver.org/spec/v2.0.0.html); the canonical version-tag history is in [CHANGELOG.md](CHANGELOG.md). See [GitHub Releases](https://github.com/Cohexa-ai/agent-coherence-plugin/releases) for tagged artifacts.
 
 ## License
 
@@ -385,10 +385,10 @@ Apache-2.0. See [LICENSE](LICENSE).
 
 ## Links
 
-- Underlying library: [hipvlady/agent-coherence](https://github.com/hipvlady/agent-coherence)
+- Underlying library: [Cohexa-ai/agent-coherence](https://github.com/Cohexa-ai/agent-coherence)
 - Discovery / book a call: [agent-coherence.dev/plugin](https://agent-coherence.dev/plugin)
-- Issue tracker: [github.com/hipvlady/agent-coherence-plugin/issues](https://github.com/hipvlady/agent-coherence-plugin/issues)
-- Discussions: [github.com/hipvlady/agent-coherence-plugin/discussions](https://github.com/hipvlady/agent-coherence-plugin/discussions)
+- Issue tracker: [github.com/Cohexa-ai/agent-coherence-plugin/issues](https://github.com/Cohexa-ai/agent-coherence-plugin/issues)
+- Discussions: [github.com/Cohexa-ai/agent-coherence-plugin/discussions](https://github.com/Cohexa-ai/agent-coherence-plugin/discussions)
 - Security: [SECURITY.md](SECURITY.md)
 - Privacy: [PRIVACY.md](PRIVACY.md)
 - Contributing: [CONTRIBUTING.md](CONTRIBUTING.md)

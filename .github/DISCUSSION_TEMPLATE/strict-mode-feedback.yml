@@ -6,7 +6,7 @@ body:
       value: |
         Welcome — this is the **Strict Mode** category. For sharing your `strict_mode.yaml` configs, asking about the deny behavior, reporting unexpected denies, or talking through whether strict mode is the right fit for a workspace.
 
-        Bugs (the wire shape is wrong, the deny didn't fire when it should have) still go to the [bug report template](https://github.com/hipvlady/agent-coherence-plugin/issues/new?template=bug_report.md) — this category is for design discussion + first-impressions feedback.
+        Bugs (the wire shape is wrong, the deny didn't fire when it should have) still go to the [bug report template](https://github.com/Cohexa-ai/agent-coherence-plugin/issues/new?template=bug_report.md) — this category is for design discussion + first-impressions feedback.
 
   - type: textarea
     id: scenario

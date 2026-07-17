@@ -41,7 +41,7 @@ docs/local/
 
 # Internal validation surfaces — kept local, not part of the public plugin source.
 # Probes are commit-time validation runs against specific Claude Code versions;
-# known-issues are tracked as GitHub issues (https://github.com/hipvlady/agent-coherence-plugin/issues)
+# known-issues are tracked as GitHub issues (https://github.com/Cohexa-ai/agent-coherence-plugin/issues)
 # with the original local files retained for design-pass reference.
 docs/probes/
 docs/known-issues/
