@@ -6,7 +6,9 @@ Alpha — APIs and the `hooks.json` wire shape may change before `v1.0`.
 
 The canonical release-notes surface is [GitHub Releases](https://github.com/Cohexa-ai/agent-coherence-plugin/releases); this file mirrors that history in a structured format for operators who prefer a single browsable timeline.
 
-## [Unreleased]
+## [0.3.0] — 2026-07-24
+
+**Zero-Python Node coordinator + composite subagent identity.** The Node backend reaches full parity with Python — no Python install required for any surface, including strict mode — and subagents become first-class coherence peers via composite identity (SB-25).
 
 ### Added
 
