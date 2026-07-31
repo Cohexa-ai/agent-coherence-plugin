@@ -109,9 +109,9 @@ First-time experience: on your first Read of a tracked file in a workspace, you'
 
 The marketplace add resolves to the latest published release. To pin a specific version: `/plugin marketplace add Cohexa-ai/agent-coherence-plugin@v0.2.2`.
 
-**Two backends, two install paths — pick one:**
+**Two backends. As of the SB-2 front-door fix, a fresh install needs neither step below** — a new workspace defaults to the **Node backend**, which self-provisions on first session (no `pip install`, no manual config). The paths below are for the Python backend or for an explicit choice.
 
-**A. Python backend (default, richest feature set).** Install the library that provides the coordinator + hook client:
+**A. Python backend (richest feature set; the default for workspaces created before this change).** Install the library that provides the coordinator + hook client:
 
 ```bash
 pip install "agent-coherence>=0.8.0"
@@ -121,7 +121,7 @@ command -v agent-coherence-coordinator
 command -v agent-coherence-hook-client
 ```
 
-**B. Node backend (zero-Python).** As of the self-sufficient Node coordinator, you can skip `pip install` entirely — the plugin's bundled `dist/` runs all six hooks, the track/untrack/status CLIs, and strict mode with **no Python required** (needs **Node ≥ 20**, where `better-sqlite3` ships prebuilts). Opt a workspace into it with one line:
+**B. Node backend (zero-Python — the default for fresh workspaces).** The plugin's bundled `dist/` runs all six hooks, the track/untrack/status CLIs, and strict mode with **no Python required** (needs **Node ≥ 20**, where `better-sqlite3` ships prebuilts). A fresh workspace selects this automatically; to opt an **existing** workspace in explicitly:
 
 ```bash
 mkdir -p .coherence && printf 'node\n' > .coherence/coordinator_backend
@@ -221,7 +221,12 @@ Two coordinator backends:
 - **Python** — canonical, richest feature set. Ships in the `agent-coherence` library on PyPI.
 - **Node** — self-sufficient (needs **no Python**): all six hooks, the track/untrack/status CLIs, and strict mode, all at wire-parity with Python. Ships in this plugin's `dist/`.
 
-**Selecting the backend.** The default is `python`. To use the Node backend for a workspace, either set the env var `COHERENCE_COORDINATOR_BACKEND=node`, or write the single word `node` to `<repo>/.coherence/coordinator_backend`:
+**Selecting the backend.** The default is **`node` for a fresh workspace** and **`python` for an established one** — resolved at `SessionStart` as: `COHERENCE_COORDINATOR_BACKEND` env → `<repo>/.coherence/coordinator_backend` file → guarded default. The default is guarded two ways, and both apply **only** when you haven't chosen explicitly:
+
+- **Established workspaces keep `python`.** If `<repo>/.coherence/state.db` already exists, the store is likely Python-owned, and the Node coordinator deliberately fails closed on a foreign ledger — so defaulting it to Node would leave you with no coordinator. Existing workspaces are left exactly as they were; switch deliberately with `agent-coherence-coordinator --prepare-for-migration`.
+- **No `node`/`npm` on PATH → `python`.** The Node bootstrap needs both to self-provision.
+
+To choose explicitly (honored verbatim, guards bypassed), set the env var `COHERENCE_COORDINATOR_BACKEND=node|python`, or write the single word to `<repo>/.coherence/coordinator_backend`:
 
 ```bash
 mkdir -p .coherence && printf 'node\n' > .coherence/coordinator_backend
@@ -308,7 +313,7 @@ The plugin-shipped path requires a Claude Code platform change — tracked in [a
 | Issue | Impact | When it matters |
 |---|---|---|
 | Native Windows not supported | `fcntl` lock primitive is POSIX-only | Use WSL2 on Windows. v0.2.x ships an `os.O_EXCL` fallback. |
-| `agent-coherence-migrate-deny` needs Python | The `permissions.deny` suggestion helper is not part of the zero-Python Node surface | Install `agent-coherence` (Python) to run the migrate-deny helper, or hand-write the `permissions.deny` rules. All runtime hooks + strict mode work without Python on the Node backend. |
+| `agent-coherence-migrate-deny` needs Python | The `permissions.deny` suggestion helper is not part of the zero-Python Node surface — and since fresh workspaces now default to Node, this is the one helper a default install cannot run | Install `agent-coherence` (Python) to run the migrate-deny helper, or hand-write the `permissions.deny` rules. All runtime hooks + strict mode work without Python on the Node backend. |
 | Hot `hook.secret` rotation not supported | v0.2 ships stop-rotate-restart procedure | If the secret is compromised, follow the troubleshooting row above. v0.2.x will add hot rotation. |
 | Bypass class: interpreters not in detector list | `ruby -e`, `node -e`, `perl -pe < file` can read tracked-strict artifacts | Operator-supplied `permissions.deny` rule per language. The `bash_path_detector` is intentionally curated; obfuscated bypass is documented as out-of-scope. |
 | Bypass class: shell-redirect reads | `tee /dev/null < tracked.md` reads the file but isn't a `cat tracked.md` invocation | **NOT closed by `permissions.deny`** (no platform syntax for shell-redirect file arguments). Terminal limitation. |

@@ -6,6 +6,15 @@ Alpha — APIs and the `hooks.json` wire shape may change before `v1.0`.
 
 The canonical release-notes surface is [GitHub Releases](https://github.com/Cohexa-ai/agent-coherence-plugin/releases); this file mirrors that history in a structured format for operators who prefer a single browsable timeline.
 
+## [Unreleased]
+
+### Changed
+
+- **The default coordinator backend is now `node` for fresh workspaces (SB-2 Phase 1, option x).** A new install auto-provisions on first session with **no `pip install` and no manual config** — closing the documented front-door failure (missed pip → coordinator absent → silent degrade) by *eliminating* the Python dependency for new users rather than provisioning it. Resolution order is `COHERENCE_COORDINATOR_BACKEND` env → `.coherence/coordinator_backend` file → guarded default, and the default is guarded twice so the flip cannot regress an existing user:
+  - **Established workspaces keep `python`.** If `.coherence/state.db` exists, the store is likely Python-owned and the Node coordinator deliberately fails closed on a foreign ledger ([#55](https://github.com/Cohexa-ai/agent-coherence-plugin/issues/55)) — defaulting it to Node would leave the workspace with *no* coordinator, i.e. the exact silent degrade this change removes. Existing installs are untouched; switch deliberately via `agent-coherence-coordinator --prepare-for-migration`.
+  - **No `node`/`npm` on PATH → `python`.** The Node bootstrap needs both to self-provision.
+  - Both guards apply to the **default only** — an explicit env/file selection is honored verbatim.
+
 ## [0.3.0] — 2026-07-24
 
 **Zero-Python Node coordinator + composite subagent identity.** The Node backend reaches full parity with Python — no Python install required for any surface, including strict mode — and subagents become first-class coherence peers via composite identity (SB-25).
