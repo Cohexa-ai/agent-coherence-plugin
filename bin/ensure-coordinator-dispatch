@@ -4,17 +4,40 @@
 # Unit 1, landed only now that Node strict mode exists per plan decision C:
 # `coordinator_backend = node` must never select a warn-only Node build).
 #
-# Backend resolution (first hit wins; default preserves existing installs):
+# Backend resolution (first hit wins):
 #   1. $COHERENCE_COORDINATOR_BACKEND env — test/CI override.
 #   2. `<workspace-root>/.coherence/coordinator_backend` file — one line,
 #      `node` or `python`. Sibling to tracked.yaml / strict_mode.yaml; this
 #      IS the storage for the README's `coherence.coordinator_backend`
 #      plugin setting (defined here — no prior mechanism existed).
-#   3. Default: `python` (the v0.1.1/v0.2 behavior, unchanged).
+#   3. Default: `node` for a FRESH workspace, `python` otherwise (see below).
+#
+# SB-2 Phase 1 resolution (option x, 2026-07-17): the default flipped from
+# `python` to `node` so a fresh install auto-provisions with NO `pip install`
+# — the Node bootstrap self-installs its deps into CLAUDE_PLUGIN_DATA. That
+# closes the documented front-door failure (missed pip → silent degrade) for
+# new users without building Python provisioning at all.
+#
+# The default is GUARDED, because a naive flip would regress existing users:
+#
+#   a. Established-workspace guard. If `.coherence/state.db` already exists,
+#      the workspace predates this change and its store is very likely
+#      Python-owned. The Node coordinator FAILS CLOSED on a foreign Python
+#      ledger (CrossRuntimeSchemaError, plugin #55) — so defaulting it to
+#      `node` would leave it with no coordinator at all: precisely the silent
+#      degrade this change exists to remove. Established workspaces therefore
+#      keep `python` until the operator opts in (or runs
+#      `agent-coherence-coordinator --prepare-for-migration`).
+#   b. Runtime guard. The Node bootstrap needs `node` AND `npm` on PATH. If
+#      either is missing, fall back to `python` rather than dead-ending.
+#
+# Both guards apply to the DEFAULT only. An EXPLICIT `node` (env or file) is
+# honored verbatim — the operator's choice, and the backends surface their own
+# errors loudly.
 #
 # Workspace root mirrors the hook-client's resolution: git common-dir (linked
-# worktrees resolve to the parent repo) else toplevel. Not a git repo → the
-# Python bootstrap degrades gracefully on its own.
+# worktrees resolve to the parent repo) else toplevel. Not a git repo → no
+# workspace state to protect, so the runtime guard alone decides.
 
 set -uo pipefail
 
@@ -33,6 +56,20 @@ if [ -z "$backend" ]; then
   fi
   if [ -n "$root" ] && [ -f "$root/.coherence/coordinator_backend" ]; then
     backend="$(head -1 "$root/.coherence/coordinator_backend" | tr -d '[:space:]')"
+  fi
+
+  # No explicit selection → the guarded default (see header).
+  if [ -z "$backend" ]; then
+    if [ -n "$root" ] && [ -f "$root/.coherence/state.db" ]; then
+      # (a) Established workspace: its store may be Python-owned, and the Node
+      # coordinator fails closed on a foreign ledger. Keep the old default.
+      backend="python"
+    elif command -v node >/dev/null 2>&1 && command -v npm >/dev/null 2>&1; then
+      # (b) Fresh workspace with a usable Node runtime → the zero-Python path.
+      backend="node"
+    else
+      backend="python"
+    fi
   fi
 fi
 

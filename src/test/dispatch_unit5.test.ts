@@ -44,16 +44,75 @@ function runDispatch(stubRoot: string, cwd: string, env: Record<string, string |
   });
 }
 
-test("dispatcher: default (no config) selects the Python bootstrap", () => {
+test("dispatcher: default on a FRESH workspace selects the Node bootstrap (SB-2 option x)", () => {
   const { root, cleanup } = makeStubbedPluginRoot();
   const ws = mkdtempSync(join(tmpdir(), "dispatch5-ws-"));
   try {
     spawnSync("git", ["init", "-q"], { cwd: ws });
+    // No .coherence/state.db → fresh install → the zero-Python default.
+    const r = runDispatch(root, ws, {});
+    assert.equal(r.stdout.trim(), "NODE-BOOTSTRAP");
+  } finally {
+    cleanup();
+    rmSync(ws, { recursive: true, force: true });
+  }
+});
+
+test("dispatcher: GUARD (a) — an ESTABLISHED workspace (state.db present) stays on Python", () => {
+  const { root, cleanup } = makeStubbedPluginRoot();
+  const ws = mkdtempSync(join(tmpdir(), "dispatch5-ws-"));
+  try {
+    spawnSync("git", ["init", "-q"], { cwd: ws });
+    mkdirSync(join(ws, ".coherence"), { recursive: true });
+    // A pre-existing store is very likely Python-owned; the Node coordinator
+    // fails closed on a foreign ledger (#55), so defaulting it to node would
+    // leave the workspace with NO coordinator — the exact silent degrade this
+    // change removes. Existing installs must be untouched.
+    writeFileSync(join(ws, ".coherence", "state.db"), "", "utf8");
     const r = runDispatch(root, ws, {});
     assert.equal(r.stdout.trim(), "PYTHON-BOOTSTRAP");
   } finally {
     cleanup();
     rmSync(ws, { recursive: true, force: true });
+  }
+});
+
+test("dispatcher: GUARD (a) is default-only — an EXPLICIT node on an established workspace is honored", () => {
+  const { root, cleanup } = makeStubbedPluginRoot();
+  const ws = mkdtempSync(join(tmpdir(), "dispatch5-ws-"));
+  try {
+    spawnSync("git", ["init", "-q"], { cwd: ws });
+    mkdirSync(join(ws, ".coherence"), { recursive: true });
+    writeFileSync(join(ws, ".coherence", "state.db"), "", "utf8");
+    writeFileSync(join(ws, ".coherence", "coordinator_backend"), "node\n", "utf8");
+    // Operator's explicit choice wins over the conservative default.
+    const r = runDispatch(root, ws, {});
+    assert.equal(r.stdout.trim(), "NODE-BOOTSTRAP");
+  } finally {
+    cleanup();
+    rmSync(ws, { recursive: true, force: true });
+  }
+});
+
+test("dispatcher: GUARD (b) — no node/npm on PATH falls back to Python instead of dead-ending", () => {
+  const { root, cleanup } = makeStubbedPluginRoot();
+  const ws = mkdtempSync(join(tmpdir(), "dispatch5-ws-"));
+  const emptyBin = mkdtempSync(join(tmpdir(), "dispatch5-nopath-"));
+  try {
+    spawnSync("git", ["init", "-q"], { cwd: ws });
+    // PATH keeps coreutils/git but hides node+npm by pointing at a dir that
+    // has neither; /usr/bin & /bin on macOS+CI carry git but not node.
+    const r = spawnSync("/bin/bash", [join(root, "bin", "ensure-coordinator-dispatch")], {
+      cwd: ws,
+      encoding: "utf8",
+      env: { PATH: `${emptyBin}:/usr/bin:/bin`, HOME: ws } as NodeJS.ProcessEnv,
+      timeout: 10000,
+    });
+    assert.equal(r.stdout.trim(), "PYTHON-BOOTSTRAP");
+  } finally {
+    cleanup();
+    rmSync(ws, { recursive: true, force: true });
+    rmSync(emptyBin, { recursive: true, force: true });
   }
 });
 
