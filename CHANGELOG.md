@@ -6,7 +6,9 @@ Alpha — APIs and the `hooks.json` wire shape may change before `v1.0`.
 
 The canonical release-notes surface is [GitHub Releases](https://github.com/Cohexa-ai/agent-coherence-plugin/releases); this file mirrors that history in a structured format for operators who prefer a single browsable timeline.
 
-## [Unreleased]
+## [0.3.1] — 2026-07-31
+
+**Default-backend flip for fresh workspaces + documentation-accuracy fixes.** No coordinator, hook, or wire-contract changes.
 
 ### Changed
 
@@ -14,6 +16,19 @@ The canonical release-notes surface is [GitHub Releases](https://github.com/Cohe
   - **Established workspaces keep `python`.** If `.coherence/state.db` exists, the store is likely Python-owned and the Node coordinator deliberately fails closed on a foreign ledger ([#55](https://github.com/Cohexa-ai/agent-coherence-plugin/issues/55)) — defaulting it to Node would leave the workspace with *no* coordinator, i.e. the exact silent degrade this change removes. Existing installs are untouched; switch deliberately via `agent-coherence-coordinator --prepare-for-migration`.
   - **No `node`/`npm` on PATH → `python`.** The Node bootstrap needs both to self-provision.
   - Both guards apply to the **default only** — an explicit env/file selection is honored verbatim.
+
+### Fixed
+
+- **`agent-coherence-status --self-test` silently reported success without running.** The bundled Node CLI discarded unrecognized flags, so on the default (Node) backend the README's flagship post-install validation printed ordinary status and exited **0** — a false positive for the exact command the docs call "the single best signal that the install actually wired up the hooks correctly." The Node CLI now **rejects unsupported flags with exit 2** and an actionable message naming the Python console script. `--self-test` remains Python-only; the README says so.
+- **`--detail metrics` was also silently ignored** on the Node CLI, always returning the minimal tier. It is now honored (the coordinator already served `?detail=`), with the value validated (`metrics` / `full`).
+- **Typo'd flags no longer pass silently** on any of the three Node CLIs (`status` / `track` / `untrack`) — an unknown option is an error, not a no-op.
+
+### Documentation
+
+- Corrected the stale version-pin example (`@v0.2.2` → `@v0.3.1`).
+- Added `SubagentStop` to the hook-taxonomy line (it shipped in 0.3.0 but the multi-target section still listed four events).
+- Retitled version-scoped sections that had drifted past their release (`Scope (v0.2)`, `Strict mode (v0.2)`, `v0.2 known limitations`) and corrected "Not supported in v0.2" for multi-target support, which read as stale while shipping v0.3.
+- Documented that `--self-test` requires the Python backend, with an alternative verification path for default (Node) installs.
 
 ## [0.3.0] — 2026-07-24
 
