@@ -79,7 +79,7 @@ Everything below is a **library console script** installed by `pip install "agen
 | Library console script | What it does | When to use |
 |---|---|---|
 | `agent-coherence-coordinator` | Spawn / inspect the lazy-spawned local HTTP coordinator | Manual recovery; backend-switch via `--prepare-for-migration` |
-| `agent-coherence-status` | CLI form of `/agent-coherence:status`; supports `--detail metrics` + `--self-test` | Post-install validation (`--self-test`); dashboard scraping (`--detail metrics`) |
+| `agent-coherence-status` | CLI form of `/agent-coherence:status`. `--detail metrics` works on both backends; **`--self-test` is Python-only** | Dashboard scraping (`--detail metrics`); post-install validation (`--self-test`, Python backend) |
 | `agent-coherence-hook-client` | Subprocess called by the plugin's command-type hooks | Internal — not for direct invocation |
 | `agent-coherence-migrate-rules` | Scan CLAUDE.md for prose tool-class rules; propose + optionally `--apply` `permissions.deny` entries | First-pass migration of `"use rg, not grep"`-style rules to enforceable policy |
 | `agent-coherence-migrate-deny` *(library v0.8.2+)* | Stricter sibling: STDOUT-only, symlink-contained, never invokes an LLM, never writes settings.json | Security-sensitive workspaces; CI-driven migration where auto-apply is not acceptable |
@@ -94,7 +94,9 @@ After install (next section), the post-install validation step:
 agent-coherence-status --self-test
 ```
 
-Runs a four-step pre-read → pre-edit → post-edit → stale-pre-read sequence against a live coordinator. Exit 0 on pass; non-zero with an actionable diagnostic on fail. This is the single best signal that the install actually wired up the hooks correctly.
+Runs a four-step pre-read → pre-edit → post-edit → stale-pre-read sequence against a live coordinator. Exit 0 on pass; non-zero with an actionable diagnostic on fail.
+
+> **`--self-test` requires the Python backend** (it ships in the `agent-coherence` library). The bundled Node CLI does not implement it and, as of v0.3.1, **rejects the flag with exit 2** rather than silently printing ordinary status — before v0.3.1 it exited 0, which looked like a passing self-test that never ran. On a default (Node) workspace, verify the install instead by opening two sessions per [Quick example](#quick-example), or by running `agent-coherence-status` and confirming the coordinator answers.
 
 First-time experience: on your first Read of a tracked file in a workspace, you'll see no behavior change — the coordinator records the artifact in SQLite and grants your session a SHARED MESI state. The plugin only surfaces warnings when a *peer* session commits a change you haven't seen yet. Easiest way to test end-to-end: open two terminals in the same repo (sections [Quick example](#quick-example) above).
 
@@ -107,7 +109,7 @@ First-time experience: on your first Read of a tracked file in a workspace, you'
 /plugin install agent-coherence@agent-coherence
 ```
 
-The marketplace add resolves to the latest published release. To pin a specific version: `/plugin marketplace add Cohexa-ai/agent-coherence-plugin@v0.2.2`.
+The marketplace add resolves to the latest published release. To pin a specific version: `/plugin marketplace add Cohexa-ai/agent-coherence-plugin@v0.3.1`.
 
 **Two backends. As of the SB-2 front-door fix, a fresh install needs neither step below** — a new workspace defaults to the **Node backend**, which self-provisions on first session (no `pip install`, no manual config). The paths below are for the Python backend or for an explicit choice.
 
@@ -140,14 +142,14 @@ After install, restart any running `claude` sessions in your workspace so the ne
 
 ### Other targets (Cursor, Codex, Copilot, etc.)
 
-**Not supported in v0.2.** The plugin's hook surface is Claude-Code-specific (`PreToolUse` / `PostToolUse` / `SessionStart` / `Stop` hook taxonomy from `hooks.json`). Multi-target support is tracked for v0.3 behind a converter-layer plan modeled on [EveryInc/compound-engineering-plugin](https://github.com/EveryInc/compound-engineering-plugin)'s `@every-env/compound-plugin` shape but adapted to the hook-coordinator architecture.
+**Not supported yet.** The plugin's hook surface is Claude-Code-specific (`PreToolUse` / `PostToolUse` / `SessionStart` / `Stop` / `SubagentStop` hook taxonomy from `hooks.json`). Multi-target support is tracked for v0.3 behind a converter-layer plan modeled on [EveryInc/compound-engineering-plugin](https://github.com/EveryInc/compound-engineering-plugin)'s `@every-env/compound-plugin` shape but adapted to the hook-coordinator architecture.
 
-### Scope (v0.2)
+### Scope
 
-- macOS / Linux / WSL2 — native Windows deferred (`fcntl` constraint, see v0.2 known limitations below).
+- macOS / Linux / WSL2 — native Windows deferred (`fcntl` constraint, see [Known limitations](#known-limitations) below).
 - Single workspace, single-user, single-host workstation — not for shared developer machines, CI runners with multiple developers, or cross-host coordination. Cross-machine and cross-vendor coverage is the hosted MCP roadmap (Path B), not this plugin.
 
-## Strict mode (v0.2)
+## Strict mode
 
 By default, the plugin is **warn-only** — when a peer session has invalidated a tracked artifact, the agent receives a warning via `additionalContext` and decides whether to re-read. v0.1.1's measured 100% re-read-or-acknowledged rate (N=80) means warn mode is sufficient for most workspaces.
 
@@ -308,7 +310,7 @@ If your team wants the same allowlist committed for everyone, put the block in `
 
 The plugin-shipped path requires a Claude Code platform change — tracked in [anthropics/claude-code#62616](https://github.com/anthropics/claude-code/issues/62616) (filed 2026-05-26 per the Phase E broad-beta monitoring window).
 
-## v0.2 known limitations
+## Known limitations
 
 | Issue | Impact | When it matters |
 |---|---|---|
@@ -322,7 +324,7 @@ The plugin-shipped path requires a Claude Code platform change — tracked in [a
 | `claude agents` subcommand not in coverage scope | The v2.1.131 subcommand is a management UI, not a session spawner; no PreToolUse hooks to capture | Use Agent View, multi-terminal, or Task-tool subagents (all in scope). |
 | Single-user, single-host workstation only | Trust boundary is the OS user; `hook.secret` mode 0600 is the load-bearing fence | Not suitable for shared developer machines, CI runners with multiple developers, or cross-host coordination. |
 
-### Resolved in v0.2
+### Resolved in v0.2–v0.3
 
 - **Strict mode** (`permissionDecision: "deny"`) per Phase 0 H4 routing-confirmation. Per-artifact opt-in via `.coherence/strict_mode.yaml`. Multi-tool surface (Read / Edit / Write / Bash / Grep) prevents the model from routing around denied Read via `bash cat plan.md`.
 - **`TERMINAL_DENIAL_CLASSES` structural invariant** — code paths emitting `permissionDecision: "allow"` route through a single `emit_allow` helper that refuses to convert strict-mode denials. Parameterized integration test + AST-based meta-test guard against future regression.

@@ -60,6 +60,53 @@ function parseArgs(argv: string[]): { paths: string[]; root: string | null } {
   return { paths, root };
 }
 
+/**
+ * Flags the bundled Node CLI accepts. Anything else is REJECTED rather than
+ * silently discarded — 0.3.1 fix. Before this, the CLI dropped unknown flags
+ * on the floor, so README-advertised options (`--self-test`, `--detail`) printed
+ * ordinary status and exited 0: a false-positive "your install is fine" for the
+ * exact command the docs call the best signal that the install works.
+ */
+const FLAGS_BY_PROG: Record<string, ReadonlySet<string>> = {
+  "agent-coherence-status": new Set(["--root", "--detail"]),
+  "agent-coherence-track": new Set(["--root"]),
+  "agent-coherence-untrack": new Set(["--root"]),
+};
+
+/** Flags the Python console script implements that the Node CLI does not. */
+const PYTHON_ONLY_FLAGS: Record<string, string> = {
+  "--self-test": "runs a live four-step pre-read → pre-edit → post-edit → stale-read sequence",
+};
+
+/** Returns an error message if argv carries a flag this CLI cannot honor. */
+function rejectUnsupportedFlags(prog: string, argv: string[]): string | null {
+  const allowed = FLAGS_BY_PROG[prog] ?? new Set(["--root"]);
+  for (const arg of argv) {
+    if (!arg.startsWith("--")) continue;
+    const name = arg.includes("=") ? arg.slice(0, arg.indexOf("=")) : arg;
+    if (allowed.has(name)) continue;
+    const pythonOnly = PYTHON_ONLY_FLAGS[name];
+    if (pythonOnly !== undefined) {
+      return (
+        `${prog}: ${name} is not supported by the bundled Node CLI (it ${pythonOnly}). ` +
+        `Install the Python library (\`pip install "agent-coherence>=0.8.0"\`) and run the ` +
+        `console script directly, or select the Python backend for this workspace ` +
+        `(\`printf 'python\\n' > .coherence/coordinator_backend\`).`
+      );
+    }
+    return `${prog}: unknown option ${name}`;
+  }
+  return null;
+}
+
+/** Value of a `--flag value` / `--flag=value` pair, or null. */
+function flagValue(argv: string[], flag: string): string | null {
+  const eq = argv.find((a) => a.startsWith(`${flag}=`));
+  if (eq !== undefined) return eq.slice(flag.length + 1);
+  const idx = argv.indexOf(flag);
+  return idx !== -1 ? (argv[idx + 1] ?? null) : null;
+}
+
 async function runPolicyMutation(
   prog: "agent-coherence-track" | "agent-coherence-untrack",
   endpointPath: "/policy/track" | "/policy/untrack",
@@ -67,6 +114,11 @@ async function runPolicyMutation(
   verb: "tracked" | "untracked",
   argv: string[],
 ): Promise<number> {
+  const flagErr = rejectUnsupportedFlags(prog, argv);
+  if (flagErr !== null) {
+    err(flagErr);
+    return 2;
+  }
   const { paths, root: rootArg } = parseArgs(argv);
   const root = rootArg ?? findCoordinatorRoot();
   if (root === null) {
@@ -124,7 +176,17 @@ export function runUntrack(argv: string[]): Promise<number> {
 }
 
 export async function runStatus(argv: string[]): Promise<number> {
+  const flagErr = rejectUnsupportedFlags("agent-coherence-status", argv);
+  if (flagErr !== null) {
+    err(flagErr);
+    return 2;
+  }
   const { root: rootArg } = parseArgs(argv);
+  const detail = flagValue(argv, "--detail");
+  if (detail !== null && !["metrics", "full"].includes(detail)) {
+    err(`agent-coherence-status: --detail must be 'metrics' or 'full' (got '${detail}')`);
+    return 2;
+  }
   const root = rootArg ?? findCoordinatorRoot();
   if (root === null) {
     err("agent-coherence-status: not in a git repository");
@@ -133,7 +195,10 @@ export async function runStatus(argv: string[]): Promise<number> {
   let payload: Record<string, unknown> | null;
   try {
     const endpoint = resolveEndpoint(resolve(root));
-    payload = await requestJson(endpoint, "GET", "/status");
+    // ?detail=full additionally requires the Coherence-Local-Operator header
+    // server-side; without it the coordinator answers 403 and that surfaces here.
+    const path = detail === null ? "/status" : `/status?detail=${encodeURIComponent(detail)}`;
+    payload = await requestJson(endpoint, "GET", path);
   } catch (exc) {
     err(`agent-coherence-status: ${(exc as Error).message}`);
     return 2;

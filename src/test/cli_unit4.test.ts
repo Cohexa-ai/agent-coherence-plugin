@@ -114,3 +114,26 @@ test("end-to-end: track writes YAML + prints; untrack uses `removed`; status ren
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+// --- 0.3.1: unsupported flags must FAIL, not silently no-op -----------------
+
+test("0.3.1: --self-test is rejected with exit 2, not a false-positive exit 0", async () => {
+  const { runStatus } = await import("../cli.js");
+  const code = await runStatus(["--self-test"]);
+  // The bug: the Node CLI discarded unknown flags, printed ordinary status and
+  // exited 0 — so the README's flagship post-install validation reported
+  // success without ever running. Non-zero is the whole point of this test.
+  assert.equal(code, 2);
+});
+
+test("0.3.1: unknown/typo flags are rejected rather than ignored", async () => {
+  const { runStatus, runTrack, runUntrack } = await import("../cli.js");
+  assert.equal(await runStatus(["--detial", "metrics"]), 2);
+  assert.equal(await runTrack(["--self-test"]), 2);
+  assert.equal(await runUntrack(["--bogus"]), 2);
+});
+
+test("0.3.1: --detail validates its value", async () => {
+  const { runStatus } = await import("../cli.js");
+  assert.equal(await runStatus(["--detail", "bogus"]), 2);
+});
