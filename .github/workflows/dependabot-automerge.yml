@@ -1,0 +1,49 @@
+# Auto-merge policy for Dependabot PRs (which target `main` per
+# .github/dependabot.yml — dev is the integration branch, but security
+# updates always go to the default branch).
+#
+# Scope — auto-approved + auto-merged once every required status check on
+# `main` passes (branch protection stays the real gate; auto-merge only
+# queues the merge):
+#   - GitHub Actions bumps (ci.yml / release.yml action versions)
+#   - npm devDependencies (direct:development), semver patch + minor only
+#
+# Everything else — production dependencies (better-sqlite3 is deliberately
+# pinned to the 12.x prebuilt line: its ABI coverage defines engines.node
+# and the ensure-coordinator-node stage-0 gate) and any semver-major bump —
+# gets no approval here and waits for a human.
+#
+# After a merge lands on main, forward-merge into dev per docs/RELEASE.md §3
+# step 5 so the next release PR doesn't show the bump as a divergence.
+name: Dependabot auto-merge
+
+on: pull_request
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  automerge:
+    name: Auto-merge safe bumps
+    if: github.event.pull_request.user.login == 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fetch update metadata
+        id: metadata
+        uses: dependabot/fetch-metadata@v2
+        with:
+          github-token: "${{ secrets.GITHUB_TOKEN }}"
+
+      - name: Approve and enable auto-merge (actions + dev-deps, patch/minor)
+        if: >-
+          (steps.metadata.outputs.package-ecosystem == 'github_actions' ||
+           steps.metadata.outputs.dependency-type == 'direct:development') &&
+          (steps.metadata.outputs.update-type == 'version-update:semver-patch' ||
+           steps.metadata.outputs.update-type == 'version-update:semver-minor')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+        run: |
+          gh pr review --approve "$PR_URL"
+          gh pr merge --auto --merge "$PR_URL"
