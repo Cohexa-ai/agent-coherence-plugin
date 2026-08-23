@@ -3,9 +3,13 @@
 #
 # Hooks route through this ONE shim so the client selection is a single seam:
 #   1. Node hook-client (dist/hook_client.js) — preferred. Uses ONLY node:
-#      builtins (no node_modules), so it runs straight from the plugin's
-#      shipped dist/ with no npm install and no Python. Backend-agnostic:
-#      it POSTs to whichever coordinator holds .coherence/server.pid.
+#      builtins (no node_modules), so it runs with no npm install and no
+#      Python. Probed in the package's own dist/ (dev checkout) THEN the
+#      PLUGIN_DATA copy that ensure-coordinator-node provisions at
+#      SessionStart — a marketplace install is a git clone and dist/ is
+#      gitignored, so there the DATA copy is the only Node client that
+#      exists. Backend-agnostic: it POSTs to whichever coordinator holds
+#      .coherence/server.pid.
 #   2. Python agent-coherence-hook-client — fallback for environments with
 #      no `node` on PATH (a Python-backend user who never needed Node).
 #   3. Emit `{}` — the hook contract's fail-open floor: Claude Code must
@@ -17,10 +21,13 @@ set -uo pipefail
 
 self_dir="$(cd "$(dirname "$0")" 2>/dev/null && pwd -P)"
 plugin_root="${CLAUDE_PLUGIN_ROOT:-$(dirname "$self_dir")}"
-node_client="${plugin_root}/dist/hook_client.js"
 
-if command -v node >/dev/null 2>&1 && [ -f "$node_client" ]; then
-  exec node "$node_client" "$@"
+if command -v node >/dev/null 2>&1; then
+  for node_client in "${plugin_root}/dist/hook_client.js" "${CLAUDE_PLUGIN_DATA:-}/dist/hook_client.js"; do
+    if [ -f "$node_client" ]; then
+      exec node "$node_client" "$@"
+    fi
+  done
 fi
 
 if command -v agent-coherence-hook-client >/dev/null 2>&1; then

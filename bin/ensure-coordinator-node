@@ -14,12 +14,20 @@
 # coordinator.js in the same tree as node_modules, so `import "better-sqlite3"`
 # resolves cleanly.
 #
-# Unit 1 scope: bootstrap + simple PID-liveness check. Unit 5 lands fcntl
-# race-safe spawn, inode revalidation per KTD-H, idle shutdown.
+# Where dist/ comes from: a marketplace install is a git clone, and dist/ is
+# gitignored — so NO released package contains compiled output (the release
+# workflow's dist.tar.gz is a GitHub-Release asset the marketplace flow never
+# consumes). When ${CLAUDE_PLUGIN_ROOT}/dist is absent, Stage 2 therefore
+# BUILDS src/ → PLUGIN_DATA/dist at provision time, with the tsc that Stage
+# 1's dev-inclusive `npm install` (or the installer's own npm install in the
+# plugin cache) provides. Before this landed, Stage 4 spawned a nonexistent
+# entry point and reported success while the coordinator crash-looped
+# MODULE_NOT_FOUND into coordinator.log — a silent no-op of every hook
+# surface on exactly the fresh installs the Node default exists to serve.
 #
-# NOT YET wired into hooks/hooks.json (still Python-default). Unit 5/6 adds
-# a backend-aware top-level dispatcher that selects this script when
-# `coherence.coordinator_backend: node` is set.
+# Selected by bin/ensure-coordinator-dispatch at SessionStart when the
+# backend resolves to `node` (env > .coherence/coordinator_backend file >
+# guarded default; see that script's header).
 
 set -uo pipefail
 
@@ -31,10 +39,24 @@ set -uo pipefail
 
 mkdir -p "${CLAUDE_PLUGIN_DATA}"
 
+# Workspace resolution (per-workspace state per KTD-C) + a virgin-store
+# marker for the post-spawn backend stamp. The marker MUST be read before
+# Stage 4 — the coordinator's own first boot creates state.db within
+# milliseconds, which would make every workspace look established.
+WORKSPACE="${AGENT_COHERENCE_WORKSPACE:-$PWD}"
+PIDFILE="${WORKSPACE}/.coherence/server.pid"
+workspace_had_state_db=0
+if [ -f "${WORKSPACE}/.coherence/state.db" ]; then
+  workspace_had_state_db=1
+fi
+
 # Stage 1: lazy `npm install` if package.json differs (initial install or
 # package update). Matches the documented pattern verbatim, with the
-# fail-then-rm-marker recovery for next-session retry.
+# fail-then-rm-marker recovery for next-session retry. `deps_changed` keys
+# Stage 2's rebuild the same way the diff keys the install.
+deps_changed=0
 if ! diff -q "${CLAUDE_PLUGIN_ROOT}/package.json" "${CLAUDE_PLUGIN_DATA}/package.json" >/dev/null 2>&1; then
+  deps_changed=1
   echo "agent-coherence: installing Node deps into ${CLAUDE_PLUGIN_DATA}" >&2
   cp "${CLAUDE_PLUGIN_ROOT}/package.json" "${CLAUDE_PLUGIN_DATA}/" || exit 1
   if [ -f "${CLAUDE_PLUGIN_ROOT}/package-lock.json" ]; then
@@ -47,23 +69,65 @@ if ! diff -q "${CLAUDE_PLUGIN_ROOT}/package.json" "${CLAUDE_PLUGIN_DATA}/package
   fi
 fi
 
-# Stage 2: mirror dist/ to PLUGIN_DATA so coordinator.js sits in the same
-# directory tree as node_modules (ESM resolution requirement). rsync only
-# copies changed files; the cp -r fallback covers systems without rsync.
-mkdir -p "${CLAUDE_PLUGIN_DATA}/dist"
-if command -v rsync >/dev/null 2>&1; then
-  rsync -a --delete "${CLAUDE_PLUGIN_ROOT}/dist/" "${CLAUDE_PLUGIN_DATA}/dist/"
-else
-  cp -r "${CLAUDE_PLUGIN_ROOT}/dist/." "${CLAUDE_PLUGIN_DATA}/dist/"
+# Stage 2: provision dist/ into PLUGIN_DATA so coordinator.js sits in the
+# same directory tree as node_modules (ESM resolution requirement). Two
+# sources, first match wins:
+#   (i)  The package ships a built dist/ (dev checkout after `npm run
+#        build`): mirror it. rsync only copies changed files; the cp -r
+#        fallback covers systems without rsync.
+#   (ii) No dist/ — the normal marketplace shape: build src/ with tsc,
+#        keyed like Stage 1 (package changed, or no built entry yet — the
+#        latter also makes a failed build retry next session). tsc is a
+#        devDependency, so it lives in PLUGIN_DATA's install and usually in
+#        the plugin cache's own node_modules too.
+if [ -f "${CLAUDE_PLUGIN_ROOT}/dist/coordinator.js" ]; then
+  mkdir -p "${CLAUDE_PLUGIN_DATA}/dist"
+  if command -v rsync >/dev/null 2>&1; then
+    rsync -a --delete "${CLAUDE_PLUGIN_ROOT}/dist/" "${CLAUDE_PLUGIN_DATA}/dist/"
+  else
+    cp -r "${CLAUDE_PLUGIN_ROOT}/dist/." "${CLAUDE_PLUGIN_DATA}/dist/"
+  fi
+elif [ "$deps_changed" = "1" ] || [ ! -f "${CLAUDE_PLUGIN_DATA}/dist/coordinator.js" ]; then
+  tsc_bin=""
+  for cand in "${CLAUDE_PLUGIN_DATA}/node_modules/.bin/tsc" "${CLAUDE_PLUGIN_ROOT}/node_modules/.bin/tsc"; do
+    if [ -x "$cand" ]; then
+      tsc_bin="$cand"
+      break
+    fi
+  done
+  if [ -z "$tsc_bin" ]; then
+    echo "agent-coherence: plugin package has no dist/ and no tsc to build src/ (checked ${CLAUDE_PLUGIN_DATA}/node_modules/.bin and ${CLAUDE_PLUGIN_ROOT}/node_modules/.bin); coordinator will not start this session. Next session retries." >&2
+    exit 1
+  fi
+  echo "agent-coherence: plugin package has no dist/ (marketplace clone); building src/ into ${CLAUDE_PLUGIN_DATA}/dist" >&2
+  # Stage src + tsconfig next to node_modules and clean-build so no stale
+  # compiled files from a previous version survive a layout change.
+  if command -v rsync >/dev/null 2>&1; then
+    rsync -a --delete "${CLAUDE_PLUGIN_ROOT}/src/" "${CLAUDE_PLUGIN_DATA}/src/"
+  else
+    rm -rf "${CLAUDE_PLUGIN_DATA}/src"
+    mkdir -p "${CLAUDE_PLUGIN_DATA}/src"
+    cp -r "${CLAUDE_PLUGIN_ROOT}/src/." "${CLAUDE_PLUGIN_DATA}/src/"
+  fi
+  cp "${CLAUDE_PLUGIN_ROOT}/tsconfig.json" "${CLAUDE_PLUGIN_DATA}/" || exit 1
+  rm -rf "${CLAUDE_PLUGIN_DATA}/dist"
+  if ! (cd "${CLAUDE_PLUGIN_DATA}" && "$tsc_bin" -p tsconfig.json) >&2; then
+    echo "agent-coherence: tsc build failed; coordinator will not start this session. Next session retries." >&2
+    exit 1
+  fi
 fi
 
-# Stage 3: simple "is coordinator running" check. Per-workspace, NOT
-# per-plugin-user — the coordinator's .coherence/ state lives in the
-# workspace per KTD-C (cross-backend coexistence). Unit 5 replaces this
-# best-effort check with a proper fcntl flock per KTD-A.5 point 1.
-WORKSPACE="${AGENT_COHERENCE_WORKSPACE:-$PWD}"
-PIDFILE="${WORKSPACE}/.coherence/server.pid"
+# Provision verification — never spawn (or report success for) a missing
+# entry point. Before this check, a dist-less package produced an infinite
+# MODULE_NOT_FOUND crash loop behind a false "spawned" message.
+if [ ! -f "${CLAUDE_PLUGIN_DATA}/dist/coordinator.js" ]; then
+  echo "agent-coherence: ${CLAUDE_PLUGIN_DATA}/dist/coordinator.js missing after provisioning; coordinator will not start this session. Next session retries. (Workaround: echo python > <workspace>/.coherence/coordinator_backend to select the Python backend.)" >&2
+  exit 1
+fi
 
+# Stage 3: simple "is coordinator running" check (WORKSPACE/PIDFILE resolved
+# up top, before the virgin-store marker). Unit 5 replaces this best-effort
+# check with a proper fcntl flock per KTD-A.5 point 1.
 if [ -f "$PIDFILE" ]; then
   EXISTING_PID=$(head -1 "$PIDFILE" 2>/dev/null || echo "")
   if [ -n "$EXISTING_PID" ] && kill -0 "$EXISTING_PID" 2>/dev/null; then
@@ -80,4 +144,31 @@ COORD_LOG="${CLAUDE_PLUGIN_DATA}/coordinator.log"
 nohup node "${CLAUDE_PLUGIN_DATA}/dist/coordinator.js" >>"$COORD_LOG" 2>&1 &
 SPAWNED_PID=$!
 disown 2>/dev/null || true
+
+# Startup liveness gate: an entry/dependency problem kills the child within
+# milliseconds (the pre-fix failure mode logged hundreds of MODULE_NOT_FOUND
+# crashes behind a false success line). Half a second catches that class; a
+# healthy coordinator keeps running. Only the spawn path pays this — the
+# common already-running session exits above.
+sleep 0.5
+if ! kill -0 "$SPAWNED_PID" 2>/dev/null; then
+  echo "agent-coherence: Node coordinator exited immediately after spawn; recent ${COORD_LOG}:" >&2
+  tail -n 12 "$COORD_LOG" >&2 2>/dev/null || true
+  exit 1
+fi
+
+# First-provision backend stamp: this bootstrap just initialized a VIRGIN
+# workspace (no state.db before boot) and proved the coordinator lives, so
+# the store is Node-owned from birth. Record that as the explicit backend
+# selection. Without the stamp, the dispatcher's guard (a) (state.db present
+# → python default) would misread the Node-born store as an established
+# Python workspace on the NEXT session and route to the Python bootstrap —
+# one working session, then silent degrade after reboot on exactly the
+# zero-Python machines the Node default exists for. An operator's existing
+# selection file is never overwritten.
+if [ "$workspace_had_state_db" = "0" ] && [ ! -f "${WORKSPACE}/.coherence/coordinator_backend" ]; then
+  mkdir -p "${WORKSPACE}/.coherence"
+  echo "node" >"${WORKSPACE}/.coherence/coordinator_backend"
+fi
+
 echo "agent-coherence: spawned Node coordinator (pid=${SPAWNED_PID}, log=${COORD_LOG})" >&2
