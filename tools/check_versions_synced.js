@@ -7,7 +7,7 @@
  *
  * Exits 0 silently on match; exits 1 with a clear diff on drift.
  *
- * Run via pre-commit hook or directly:  node tools/check_versions_synced.js
+ * Run in CI (ci.yml `version-sync` job) or directly:  node tools/check_versions_synced.js
  */
 
 import { readFileSync } from 'node:fs';
