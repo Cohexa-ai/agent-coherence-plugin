@@ -64,6 +64,37 @@ case "$NODE_MAJOR" in
     ;;
 esac
 
+# The running Node's ABI (`process.versions.modules`) is what a compiled
+# better_sqlite3.node is actually bound to — 131 for Node 23, 137 for Node
+# 24 — and a binary built for one is a hard load error under the other. It
+# is the provisioning key package.json cannot express; see Stage 1.
+NODE_ABI="$(node -p 'process.versions.modules' 2>/dev/null || echo unknown)"
+ABI_STAMP="${CLAUDE_PLUGIN_DATA}/.node-abi"
+
+# Does the provisioned native addon actually load under THIS node?
+#
+# Deliberately CONSTRUCTS a Database: better-sqlite3 resolves its addon
+# through `bindings` at first use, not at require time, so a bare
+# `require("better-sqlite3")` exits 0 even when the .node file is missing or
+# ABI-stale — a probe keyed on require alone passes in exactly the broken
+# states it exists to catch.
+#
+# Keyed on what the provisioned package.json DECLARES, not on what resolves:
+# a package that never depended on better-sqlite3 (the provisioning tests'
+# zero-dependency stub) is healthy by definition, while one that declares it
+# and cannot resolve it is broken — an unresolvable-means-fine probe would
+# call a wiped node_modules healthy.
+native_module_loads() {
+  (
+    cd "${CLAUDE_PLUGIN_DATA}" 2>/dev/null || exit 1
+    node -e '
+      const deps = require("./package.json").dependencies || {};
+      if (!deps["better-sqlite3"]) process.exit(0);
+      new (require("better-sqlite3"))(":memory:").close();
+    '
+  ) >/dev/null 2>&1
+}
+
 # Workspace resolution (per-workspace state per KTD-C) + a virgin-store
 # marker for the post-spawn backend stamp. The marker MUST be read before
 # Stage 4 — the coordinator's own first boot creates state.db within
@@ -75,17 +106,79 @@ if [ -f "${WORKSPACE}/.coherence/state.db" ]; then
   workspace_had_state_db=1
 fi
 
-# Stage 1: lazy `npm install` if package.json differs (initial install or
-# package update). Matches the documented pattern verbatim, with the
-# fail-then-rm-marker recovery for next-session retry. `deps_changed` keys
-# Stage 2's rebuild the same way the diff keys the install.
+# Stage 1: lazy `npm install`, keyed on BOTH signals that can invalidate the
+# provisioned tree:
+#
+#   (a) package.json differs — initial install or package update. The
+#       documented pattern, with the fail-then-rm-marker recovery for
+#       next-session retry. `deps_changed` keys Stage 2's rebuild the same
+#       way the diff keys the install.
+#   (b) the Node ABI differs from the one the tree was provisioned under. A
+#       compiled better_sqlite3.node is bound to process.versions.modules,
+#       which package.json cannot express — so (a) alone is blind to a user
+#       installing a new Node major, and the coordinator crash-loops
+#       "compiled against a different Node.js version using
+#       NODE_MODULE_VERSION 131 ... requires NODE_MODULE_VERSION 137"
+#       forever, with no session ever repairing it. Worse, (a) firing does
+#       NOT repair it either: npm sees better-sqlite3 already present at a
+#       satisfying version and leaves the stale binary untouched, so the
+#       0.3.1 -> 0.4.0 package bump ran a full install and still shipped an
+#       ABI-131 binary to a Node 24 user.
+#
+# On (b) the node_modules tree is TORN DOWN rather than installed over: a
+# clean install is what makes prebuild-install refetch the prebuilt for this
+# ABI. `npm rebuild` is deliberately not used — it compiles from source via
+# node-gyp, which needs Python and a C++ toolchain, the exact dependencies
+# decision B's zero-Python guarantee forbids.
 deps_changed=0
 if ! diff -q "${CLAUDE_PLUGIN_ROOT}/package.json" "${CLAUDE_PLUGIN_DATA}/package.json" >/dev/null 2>&1; then
   deps_changed=1
+fi
+
+# Native gate: is the provisioned tree valid for THIS node?
+#
+# A stamp from a previous successful provision is the cheap answer, and it
+# is read only OVER a populated node_modules — a stamp left behind by a
+# hand-deleted tree vouches for nothing, and taking its word would wave a
+# MODULE_NOT_FOUND crash loop straight through. Anything else (a tree from
+# before this gate existed, one the liveness gate below invalidated, one
+# whose node_modules is gone) is settled by probing rather than reinstalling
+# blindly: a healthy legacy tree then costs only a stamp backfill — no
+# network, no reinstall — while a genuinely stale one is rebuilt.
+native_stale=0
+stamped_abi=""
+if [ -d "${CLAUDE_PLUGIN_DATA}/node_modules" ]; then
+  stamped_abi="$(cat "$ABI_STAMP" 2>/dev/null || true)"
+fi
+if [ -n "$stamped_abi" ]; then
+  if [ "$stamped_abi" != "$NODE_ABI" ]; then
+    native_stale=1
+    echo "agent-coherence: Node ABI changed (${stamped_abi} -> ${NODE_ABI}); reinstalling native deps" >&2
+  fi
+elif [ "$deps_changed" = "0" ]; then
+  # No usable stamp and no install already queued — probe. (An install about
+  # to run makes the answer moot, so the common first-provision path pays
+  # nothing for this.)
+  if native_module_loads; then
+    printf '%s\n' "$NODE_ABI" >"$ABI_STAMP"
+  else
+    native_stale=1
+    echo "agent-coherence: provisioned native addon does not load under Node ${NODE_VERSION_RAW} (ABI ${NODE_ABI}); reinstalling" >&2
+  fi
+fi
+
+if [ "$deps_changed" = "1" ] || [ "$native_stale" = "1" ]; then
   echo "agent-coherence: installing Node deps into ${CLAUDE_PLUGIN_DATA}" >&2
   cp "${CLAUDE_PLUGIN_ROOT}/package.json" "${CLAUDE_PLUGIN_DATA}/" || exit 1
   if [ -f "${CLAUDE_PLUGIN_ROOT}/package-lock.json" ]; then
     cp "${CLAUDE_PLUGIN_ROOT}/package-lock.json" "${CLAUDE_PLUGIN_DATA}/" || true
+  fi
+  # Clear the stamp BEFORE the install, not just rewrite it after: if the
+  # install dies partway, the next session must see "unstamped" and probe —
+  # never a stamp vouching for a tree that was torn down.
+  rm -f "$ABI_STAMP"
+  if [ "$native_stale" = "1" ]; then
+    rm -rf "${CLAUDE_PLUGIN_DATA}/node_modules"
   fi
   # --engine-strict turns the engines.node range into a hard install-time
   # gate (npm only warns by default), so the Stage-0 list above can never
@@ -95,8 +188,24 @@ if ! diff -q "${CLAUDE_PLUGIN_ROOT}/package.json" "${CLAUDE_PLUGIN_DATA}/package
     echo "agent-coherence: npm install failed; coordinator will not start this session. Next session retries." >&2
     echo "agent-coherence: (a 'No prebuilt binaries found' / node-gyp trace above means this Node major" >&2
     echo "agent-coherence: lacks a better-sqlite3 prebuilt — supported majors: 22 / 24 / 25.)" >&2
+    echo "agent-coherence: (an ESTRICTALLOWSCRIPTS error means npm 11 blocked an install script; the" >&2
+    echo "agent-coherence: allowScripts entry in package.json covers better-sqlite3's prebuilt fetch," >&2
+    echo "agent-coherence: so a NEW package there needs adding to it.)" >&2
     exit 1
   fi
+  # Install-time verification. npm exiting 0 does NOT prove the native addon
+  # arrived: better-sqlite3's install script IS the prebuilt download, so an
+  # `ignore-scripts=true` in any npmrc suppresses it silently and yields a
+  # tree that installs "successfully" and then crash-loops at first Database
+  # open. Prove the addon loads before stamping this ABI as good.
+  if ! native_module_loads; then
+    rm -f "${CLAUDE_PLUGIN_DATA}/package.json"
+    echo "agent-coherence: npm install reported success but the better-sqlite3 native addon does not load; coordinator will not start this session. Next session retries." >&2
+    echo "agent-coherence: (most likely 'ignore-scripts' is set in an npmrc — better-sqlite3's install" >&2
+    echo "agent-coherence: script is the prebuilt download, so suppressing it leaves no binary behind.)" >&2
+    exit 1
+  fi
+  printf '%s\n' "$NODE_ABI" >"$ABI_STAMP"
 fi
 
 # Stage 2: provision dist/ into PLUGIN_DATA so coordinator.js sits in the
@@ -106,10 +215,26 @@ fi
 #        build`): mirror it. rsync only copies changed files; the cp -r
 #        fallback covers systems without rsync.
 #   (ii) No dist/ — the normal marketplace shape: build src/ with tsc,
-#        keyed like Stage 1 (package changed, or no built entry yet — the
-#        latter also makes a failed build retry next session). tsc is a
+#        keyed on a package change or a stale built entry. tsc is a
 #        devDependency, so it lives in PLUGIN_DATA's install and usually in
 #        the plugin cache's own node_modules too.
+#
+# "Stale" is the Stage-1 ABI lesson applied to this key: package.json is
+# only a PROXY for "the package changed", so a plugin update that touches
+# src/ without bumping the version would otherwise keep the old dist/
+# forever. A git update rewrites mtimes, so newer-than-the-built-entry is
+# the signal that actually tracks the sources. A missing entry also counts,
+# which is what makes a FAILED build retry next session.
+#
+# An ABI change deliberately does NOT key this rebuild: dist/ is tsc output,
+# plain JavaScript, with no binding to process.versions.modules.
+dist_stale=0
+if [ ! -f "${CLAUDE_PLUGIN_DATA}/dist/coordinator.js" ]; then
+  dist_stale=1
+elif [ -n "$(find "${CLAUDE_PLUGIN_ROOT}/src" "${CLAUDE_PLUGIN_ROOT}/tsconfig.json" \
+  -newer "${CLAUDE_PLUGIN_DATA}/dist/coordinator.js" -print -quit 2>/dev/null)" ]; then
+  dist_stale=1
+fi
 if [ -f "${CLAUDE_PLUGIN_ROOT}/dist/coordinator.js" ]; then
   mkdir -p "${CLAUDE_PLUGIN_DATA}/dist"
   if command -v rsync >/dev/null 2>&1; then
@@ -117,7 +242,7 @@ if [ -f "${CLAUDE_PLUGIN_ROOT}/dist/coordinator.js" ]; then
   else
     cp -r "${CLAUDE_PLUGIN_ROOT}/dist/." "${CLAUDE_PLUGIN_DATA}/dist/"
   fi
-elif [ "$deps_changed" = "1" ] || [ ! -f "${CLAUDE_PLUGIN_DATA}/dist/coordinator.js" ]; then
+elif [ "$deps_changed" = "1" ] || [ "$dist_stale" = "1" ]; then
   tsc_bin=""
   for cand in "${CLAUDE_PLUGIN_DATA}/node_modules/.bin/tsc" "${CLAUDE_PLUGIN_ROOT}/node_modules/.bin/tsc"; do
     if [ -x "$cand" ]; then
@@ -184,6 +309,17 @@ sleep 0.5
 if ! kill -0 "$SPAWNED_PID" 2>/dev/null; then
   echo "agent-coherence: Node coordinator exited immediately after spawn; recent ${COORD_LOG}:" >&2
   tail -n 12 "$COORD_LOG" >&2 2>/dev/null || true
+  # A NODE_MODULE_VERSION death means node_modules is ABI-stale despite a
+  # stamp that vouched for it — a hand-restored tree, a partial install, a
+  # stamp written before this session's node changed underneath it. Drop the
+  # stamp so the next session probes and reinstalls instead of crash-looping
+  # forever. Scoped to that one error, and self-limiting: an unstamped tree
+  # that actually loads is only backfilled, never reinstalled, so an
+  # unrelated coordinator crash cannot turn into a reinstall every session.
+  if tail -n 40 "$COORD_LOG" 2>/dev/null | grep -q 'NODE_MODULE_VERSION'; then
+    rm -f "$ABI_STAMP"
+    echo "agent-coherence: (native-ABI mismatch detected; next session reprovisions node_modules.)" >&2
+  fi
   exit 1
 fi
 
