@@ -26,6 +26,9 @@
     "js-yaml": "^4.3.1",
     "uuid": "^14.0.1"
   },
+  "allowScripts": {
+    "better-sqlite3": true
+  },
   "devDependencies": {
     "@eslint/js": "^9.39.4",
     "@types/better-sqlite3": "^7.6.13",

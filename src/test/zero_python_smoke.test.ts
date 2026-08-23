@@ -258,6 +258,14 @@ test(
           PATH: `${emptyDir}:${nodeDir}:/usr/bin:/bin`,
           HOME: root,
           NODE_GYP_FORCE_PYTHON: "/nonexistent",
+          // npm 11 gates install scripts behind package.json's allowScripts,
+          // and better-sqlite3's install script IS prebuild-install — the
+          // prebuilt download the zero-Python guarantee rests on. Default is
+          // warn-only, so strict is what turns the allowlist into something
+          // this assertion can actually hold: an uncovered install script
+          // fails here instead of quietly degrading to a node-gyp build on
+          // some user's machine. npm 10 does not know the config, ignores it.
+          npm_config_strict_allow_scripts: "true",
           CLAUDE_PLUGIN_ROOT: pluginRoot,
           CLAUDE_PLUGIN_DATA: join(root, "plugin-data"),
         } as NodeJS.ProcessEnv,

@@ -58,6 +58,18 @@ const HEALTHY_COORDINATOR_TS =
 const CRASHING_COORDINATOR_TS = 'throw new Error("stub coordinator crash on boot");\n';
 const HEALTHY_PREBUILT_JS = 'setInterval(() => {}, 60_000);\n';
 
+// The exact crash a Node-major change produces once node_modules holds a
+// binary built for the previous ABI — the failure this file's ABI-stamp
+// tests exist to make self-healing.
+const ABI_CRASH_COORDINATOR_TS =
+  "throw new Error(\"The module '/x/better_sqlite3.node' was compiled against a " +
+  'different Node.js version using NODE_MODULE_VERSION 131. This version of Node.js ' +
+  'requires NODE_MODULE_VERSION 137.");\n';
+
+/** The ABI the running node binds native addons to — what the stamp records. */
+const RUNNING_ABI = process.versions.modules;
+const ABI_STAMP = '.node-abi';
+
 interface StubRootOpts {
   /** When set, the package ships src/coordinator.ts + tsconfig.json (marketplace shape). */
   srcCoordinatorTs?: string;
@@ -178,10 +190,13 @@ test('provisioning is keyed: an unchanged package skips the rebuild and just spa
         0,
         `second bootstrap failed:\n${second.stdout}\n${second.stderr}`
       );
-      // Same package.json + entry already built → no install, no rebuild.
+      // Same package.json, same ABI, entry already built → no install, no
+      // rebuild. The ABI key must not turn every session into a reinstall.
       assert.doesNotMatch(second.stderr, /installing Node deps/);
       assert.doesNotMatch(second.stderr, /building src\//);
+      assert.doesNotMatch(second.stderr, /Node ABI changed/);
       assert.match(second.stderr, /spawned Node coordinator/);
+      assert.equal(readFileSync(join(data, ABI_STAMP), 'utf8').trim(), RUNNING_ABI);
     } finally {
       killSpawned(second.stderr ?? '');
     }
@@ -219,6 +234,11 @@ test("LIVENESS GATE: a coordinator that dies on boot → exit 1 with a log excer
     assert.doesNotMatch(r.stderr, /spawned Node coordinator/);
     // A FAILED boot must not stamp the workspace as node-backed.
     assert.equal(existsSync(join(ws, '.coherence', 'coordinator_backend')), false);
+    // ...but a crash with no NODE_MODULE_VERSION in it is NOT an ABI problem,
+    // so the ABI stamp must survive. Invalidating it on any crash would turn
+    // an ordinary coordinator bug into a full npm reinstall every session.
+    assert.equal(readFileSync(join(data, ABI_STAMP), 'utf8').trim(), RUNNING_ABI);
+    assert.doesNotMatch(r.stderr, /next session reprovisions/);
   } finally {
     rmSync(root, { recursive: true, force: true });
     cleanup();
@@ -267,6 +287,156 @@ test("an operator's existing coordinator_backend file is never overwritten by th
       assert.equal(readFileSync(join(ws, '.coherence', 'coordinator_backend'), 'utf8'), 'python\n');
     } finally {
       killSpawned(r.stderr ?? '');
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    cleanup();
+  }
+});
+
+test('ABI STAMP: a successful provision records the running Node ABI', () => {
+  const root = makeStubRoot({ srcCoordinatorTs: HEALTHY_COORDINATOR_TS, withTsc: true });
+  const { data, ws, cleanup } = makeDirs();
+  try {
+    const r = runBootstrap(root, data, ws);
+    try {
+      assert.equal(r.status, 0, `bootstrap failed:\n${r.stdout}\n${r.stderr}`);
+      // process.versions.modules — NOT the Node version. A binary is bound to
+      // the ABI, and two Node majors can share one (as 24 and 25 nearly did).
+      assert.equal(readFileSync(join(data, ABI_STAMP), 'utf8').trim(), RUNNING_ABI);
+    } finally {
+      killSpawned(r.stderr ?? '');
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    cleanup();
+  }
+});
+
+test('REGRESSION: a Node-major change (stale ABI stamp) forces a CLEAN reinstall', () => {
+  const root = makeStubRoot({ srcCoordinatorTs: HEALTHY_COORDINATOR_TS, withTsc: true });
+  const { data, ws, cleanup } = makeDirs();
+  try {
+    const first = runBootstrap(root, data, ws);
+    killSpawned(first.stderr ?? '');
+    assert.equal(first.status, 0, `first bootstrap failed:\n${first.stdout}\n${first.stderr}`);
+
+    // Stand in for the tree a previous Node major left behind: node_modules
+    // present, holding a binary compiled for ABI 131 (Node 23). The sentinel
+    // is the load-bearing part — a plain `npm install` over this tree leaves
+    // it untouched, because npm sees a satisfying version already installed,
+    // which is exactly how the 0.3.1 -> 0.4.0 bump shipped a stale binary to
+    // a Node 24 user. Only a teardown removes it.
+    const sentinel = join(data, 'node_modules', 'STALE-ABI-131-ARTIFACT');
+    mkdirSync(join(data, 'node_modules'), { recursive: true });
+    writeFileSync(sentinel, 'compiled for NODE_MODULE_VERSION 131\n');
+    writeFileSync(join(data, ABI_STAMP), '131\n');
+
+    const second = runBootstrap(root, data, ws);
+    try {
+      assert.equal(
+        second.status,
+        0,
+        `second bootstrap failed:\n${second.stdout}\n${second.stderr}`
+      );
+      assert.match(second.stderr, new RegExp(`Node ABI changed \\(131 -> ${RUNNING_ABI}\\)`));
+      assert.match(second.stderr, /installing Node deps/);
+      assert.equal(
+        existsSync(sentinel),
+        false,
+        'stale node_modules must be torn down, not installed over'
+      );
+      assert.equal(readFileSync(join(data, ABI_STAMP), 'utf8').trim(), RUNNING_ABI);
+      assert.match(second.stderr, /spawned Node coordinator/);
+    } finally {
+      killSpawned(second.stderr ?? '');
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    cleanup();
+  }
+});
+
+test('a stamp left behind by a hand-deleted node_modules does not vouch for the missing tree', () => {
+  const root = makeStubRoot({ srcCoordinatorTs: HEALTHY_COORDINATOR_TS, withTsc: true });
+  const { data, ws, cleanup } = makeDirs();
+  try {
+    const first = runBootstrap(root, data, ws);
+    killSpawned(first.stderr ?? '');
+    assert.equal(first.status, 0, `first bootstrap failed:\n${first.stdout}\n${first.stderr}`);
+
+    // A CURRENT-ABI stamp over a tree that isn't there. Reading the stamp
+    // without checking the tree would take the fast path and spawn straight
+    // into a MODULE_NOT_FOUND crash loop.
+    rmSync(join(data, 'node_modules'), { recursive: true, force: true });
+    writeFileSync(join(data, ABI_STAMP), `${RUNNING_ABI}\n`);
+
+    const second = runBootstrap(root, data, ws);
+    try {
+      assert.equal(
+        second.status,
+        0,
+        `second bootstrap failed:\n${second.stdout}\n${second.stderr}`
+      );
+      assert.match(second.stderr, /spawned Node coordinator/);
+      assert.equal(readFileSync(join(data, ABI_STAMP), 'utf8').trim(), RUNNING_ABI);
+    } finally {
+      killSpawned(second.stderr ?? '');
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    cleanup();
+  }
+});
+
+test('SELF-HEAL: a NODE_MODULE_VERSION crash invalidates the stamp so the next session reprovisions', () => {
+  const root = makeStubRoot({ srcCoordinatorTs: ABI_CRASH_COORDINATOR_TS, withTsc: true });
+  const { data, ws, cleanup } = makeDirs();
+  try {
+    const r = runBootstrap(root, data, ws);
+    assert.equal(r.status, 1, `expected loud failure:\n${r.stdout}\n${r.stderr}`);
+    assert.match(r.stderr, /exited immediately after spawn/);
+    assert.doesNotMatch(r.stderr, /spawned Node coordinator/);
+    // The stamp vouched for a tree that cannot load. Dropping it is what
+    // turns "dead until the user figures it out" into one bad session: the
+    // next run finds no stamp, probes, and reinstalls.
+    assert.match(r.stderr, /next session reprovisions/);
+    assert.equal(existsSync(join(data, ABI_STAMP)), false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    cleanup();
+  }
+});
+
+test('STAGE 2: a src/ change with no package.json change still rebuilds dist/', () => {
+  const root = makeStubRoot({ srcCoordinatorTs: HEALTHY_COORDINATOR_TS, withTsc: true });
+  const { data, ws, cleanup } = makeDirs();
+  try {
+    const first = runBootstrap(root, data, ws);
+    killSpawned(first.stderr ?? '');
+    assert.equal(first.status, 0, `first bootstrap failed:\n${first.stdout}\n${first.stderr}`);
+    assert.match(first.stderr, /building src\//);
+
+    // A plugin update that touches src/ without bumping the version — the
+    // same shape as the ABI bug: package.json is a proxy, and keying only on
+    // it serves the OLD dist/ forever.
+    writeFileSync(
+      join(root, 'src', 'coordinator.ts'),
+      `${HEALTHY_COORDINATOR_TS}const marker = "SECOND-REVISION";\nvoid marker;\n`
+    );
+
+    const second = runBootstrap(root, data, ws);
+    try {
+      assert.equal(
+        second.status,
+        0,
+        `second bootstrap failed:\n${second.stdout}\n${second.stderr}`
+      );
+      assert.match(second.stderr, /building src\//);
+      assert.doesNotMatch(second.stderr, /installing Node deps/);
+      assert.match(readFileSync(join(data, 'dist', 'coordinator.js'), 'utf8'), /SECOND-REVISION/);
+    } finally {
+      killSpawned(second.stderr ?? '');
     }
   } finally {
     rmSync(root, { recursive: true, force: true });
