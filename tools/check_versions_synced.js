@@ -5,14 +5,24 @@
  *   - .claude-plugin/plugin.json            .version
  *   - .claude-plugin/marketplace.json       .plugins[0].version
  *
+ * When RELEASE_TAG is set (exported by the release.yml preflight from
+ * `github.ref_name`), additionally require the tag to equal `v<version>`.
+ * Unset RELEASE_TAG skips only the tag comparison — local pre-tag runs and
+ * the pre-commit hook still get the three-file check.
+ *
  * Exits 0 silently on match; exits 1 with a clear diff on drift.
  *
- * Run via pre-commit hook or directly:  node tools/check_versions_synced.js
+ * Run via pre-commit hook, CI, or directly:
+ *   node tools/check_versions_synced.js [rootDir]
+ * `rootDir` defaults to the repo root and exists for the test suite.
+ *
+ * Also importable — `check_release_readiness.js` consumes `evaluateVersionSync`
+ * as its manifest-version check; importing never runs the CLI entry point.
  */
 
-import { readFileSync } from 'node:fs';
+import { readFileSync, realpathSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -31,23 +41,68 @@ const sources = [
   },
 ];
 
-const readings = sources.map(({ path, extract }) => {
-  const raw = readFileSync(resolve(repoRoot, path), 'utf8');
-  const parsed = JSON.parse(raw);
-  return { path, version: extract(parsed) };
-});
-
-const missing = readings.filter((r) => !r.version);
-if (missing.length > 0) {
-  console.error('check_versions_synced: missing version field in:');
-  missing.forEach((r) => console.error(`  - ${r.path}`));
-  process.exit(1);
+/** Read the three manifests under rootDir → [{ path, version }]. Throws on unreadable/invalid JSON. */
+export function collectVersionReadings(rootDir) {
+  return sources.map(({ path, extract }) => {
+    const raw = readFileSync(resolve(rootDir, path), 'utf8');
+    return { path, version: extract(JSON.parse(raw)) };
+  });
 }
 
-const versions = new Set(readings.map((r) => r.version));
-if (versions.size > 1) {
-  console.error('check_versions_synced: version drift detected');
-  readings.forEach((r) => console.error(`  ${r.path}: ${r.version}`));
-  console.error('All three files must declare the same version.');
-  process.exit(1);
+/**
+ * Single verdict over the three manifests, plus the tag when given.
+ * Returns { ok: boolean, detail: string } — never throws, never exits.
+ */
+export function evaluateVersionSync(rootDir, tag) {
+  let readings;
+  try {
+    readings = collectVersionReadings(rootDir);
+  } catch (err) {
+    return { ok: false, detail: `could not read manifests: ${err.message}` };
+  }
+
+  const missing = readings.filter((r) => !r.version);
+  if (missing.length > 0) {
+    const paths = missing.map((r) => r.path).join(', ');
+    return { ok: false, detail: `missing version field in: ${paths}` };
+  }
+
+  const distinct = new Set(readings.map((r) => r.version));
+  if (distinct.size > 1) {
+    const listing = readings.map((r) => `${r.path}=${r.version}`).join(', ');
+    return { ok: false, detail: `version drift: ${listing}` };
+  }
+
+  const version = readings[0].version;
+  if (tag != null && tag !== '') {
+    if (tag !== `v${version}`) {
+      return {
+        ok: false,
+        detail: `tag ${tag} does not match manifest version ${version} (expected v${version})`,
+      };
+    }
+    return { ok: true, detail: `all manifests at ${version}; tag ${tag} matches` };
+  }
+  return { ok: true, detail: `all manifests at ${version} (tag check skipped — RELEASE_TAG not set)` };
 }
+
+function main() {
+  const rootDir = process.argv[2] ? resolve(process.argv[2]) : repoRoot;
+  const verdict = evaluateVersionSync(rootDir, process.env.RELEASE_TAG);
+  if (!verdict.ok) {
+    console.error(`check_versions_synced: ${verdict.detail}`);
+    process.exit(1);
+  }
+}
+
+function isDirectRun() {
+  if (!process.argv[1]) return false;
+  try {
+    // realpath both sides: node resolves the main module through symlinks.
+    return import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href;
+  } catch {
+    return false;
+  }
+}
+
+if (isDirectRun()) main();

@@ -12,6 +12,10 @@ The canonical release-notes surface is [GitHub Releases](https://github.com/Cohe
 
 - **`.claude-plugin/marketplace.json` still declared `0.3.0` after the v0.3.1 release.** PR [#95](https://github.com/Cohexa-ai/agent-coherence-plugin/pull/95) bumped `package.json` and `plugin.json` only; the pre-commit hook that checks the sync is advisory, and the release workflow compared the tag against `package.json` alone, so the drift shipped. The marketplace entry now reads `0.3.1`.
 
+### Added
+
+- **CI and the release preflight now fail closed on manifest version drift.** `tools/check_versions_synced.js` runs on every CI build, and `tools/check_release_readiness.js` gained a fourth check asserting `package.json` == `.claude-plugin/plugin.json` == `.claude-plugin/marketplace.json` — and, in the tag-triggered release preflight (which now exports `RELEASE_TAG`), that the pushed tag equals `v<version>`. Regression tests (`src/test/version_sync.test.ts`) cover drift, missing fields, tag mismatch, and the live repo manifests.
+
 ## [0.3.1] — 2026-07-31
 
 **Default-backend flip for fresh workspaces + documentation-accuracy fixes.** No coordinator, hook, or wire-contract changes.
