@@ -8,6 +8,10 @@ The canonical release-notes surface is [GitHub Releases](https://github.com/Cohe
 
 ## [Unreleased]
 
+### Added
+
+- **Dependabot bumps auto-merge when they're safe.** A new `dependabot-automerge.yml` workflow auto-approves and queues auto-merge for GitHub Actions bumps and npm devDependency patch/minor bumps — branch protection's required CI contexts remain the gate; the workflow only removes the human round-trip for changes that can't affect the shipped plugin. Production dependencies and semver-major bumps still require a human: `better-sqlite3` in particular is deliberately pinned to the 12.x prebuilt line, whose ABI coverage defines `engines.node` and the bootstrap's stage-0 Node-major gate.
+
 ### Changed
 
 - **`engines.node` is now `^22.0.0 || ^24.0.0 || ^25.0.0` — exactly the majors with a `better-sqlite3` prebuilt for the locked 12.x line (ABIs 127/137/141).** `better-sqlite3` 12.10.0 dropped its Node 20 (ABI 115) and Node 23 (ABI 131) prebuilt binaries — Node 20 reached end-of-life 2026-04-30 — so the old `>=20 <25` range promised majors that can only install via the node-gyp fallback: Python plus a C++ toolchain, exactly the dependencies decision B forbids. Observed in the wild on macOS + Node 23.11.0: SessionStart bootstrap → `prebuild-install warn install No prebuilt binaries found (target=23.11.0)` → node-gyp → hard failure under Xcode's libtool. (Node 26 joins the range once its final ABI ships prebuilt; on other majors the plugin runs on the Python backend.)
