@@ -44,13 +44,36 @@ function runDispatch(stubRoot: string, cwd: string, env: Record<string, string |
   });
 }
 
+/**
+ * Stub `node` (reporting the given major for the dispatcher's ABI probe) and
+ * `npm` into a bin dir, so runtime-guard tests are deterministic regardless
+ * of the Node actually running the suite. Returns a PATH that keeps
+ * coreutils/git (/usr/bin:/bin) but resolves node/npm to the stubs.
+ */
+function makeRuntimeStubPath(dir: string, nodeMajor: number): string {
+  const stubBin = join(dir, "stub-bin");
+  mkdirSync(stubBin, { recursive: true });
+  writeFileSync(join(stubBin, "node"), `#!/bin/sh\necho ${nodeMajor}\n`, "utf8");
+  writeFileSync(join(stubBin, "npm"), `#!/bin/sh\nexit 0\n`, "utf8");
+  chmodSync(join(stubBin, "node"), 0o755);
+  chmodSync(join(stubBin, "npm"), 0o755);
+  return `${stubBin}:/usr/bin:/bin`;
+}
+
 test("dispatcher: default on a FRESH workspace selects the Node bootstrap (SB-2 option x)", () => {
   const { root, cleanup } = makeStubbedPluginRoot();
   const ws = mkdtempSync(join(tmpdir(), "dispatch5-ws-"));
   try {
     spawnSync("git", ["init", "-q"], { cwd: ws });
     // No .coherence/state.db → fresh install → the zero-Python default.
-    const r = runDispatch(root, ws, {});
+    // node stubbed to major 24 (a prebuilt ABI) so the runtime guard's
+    // verdict does not depend on whichever Node runs this suite.
+    const r = spawnSync("/bin/bash", [join(root, "bin", "ensure-coordinator-dispatch")], {
+      cwd: ws,
+      encoding: "utf8",
+      env: { PATH: makeRuntimeStubPath(ws, 24), HOME: ws } as NodeJS.ProcessEnv,
+      timeout: 10000,
+    });
     assert.equal(r.stdout.trim(), "NODE-BOOTSTRAP");
   } finally {
     cleanup();
@@ -113,6 +136,42 @@ test("dispatcher: GUARD (b) — no node/npm on PATH falls back to Python instead
     cleanup();
     rmSync(ws, { recursive: true, force: true });
     rmSync(emptyBin, { recursive: true, force: true });
+  }
+});
+
+test("dispatcher: GUARD (b) — a Node major with no better-sqlite3 prebuilt (23) falls back to Python; explicit node is still honored", () => {
+  const { root, cleanup } = makeStubbedPluginRoot();
+  const ws = mkdtempSync(join(tmpdir(), "dispatch5-ws-"));
+  try {
+    spawnSync("git", ["init", "-q"], { cwd: ws });
+    const path23 = makeRuntimeStubPath(ws, 23);
+    // Fresh workspace + Node 23 (ABI 131 — better-sqlite3 12.10.0 dropped its
+    // prebuilt): the zero-Python default cannot succeed (npm would fall back
+    // to node-gyp, i.e. Python), so the guarded default takes the working
+    // Python path and says why on stderr.
+    const fallback = spawnSync("/bin/bash", [join(root, "bin", "ensure-coordinator-dispatch")], {
+      cwd: ws,
+      encoding: "utf8",
+      env: { PATH: path23, HOME: ws } as NodeJS.ProcessEnv,
+      timeout: 10000,
+    });
+    assert.equal(fallback.stdout.trim(), "PYTHON-BOOTSTRAP");
+    assert.match(fallback.stderr, /no better-sqlite3 prebuilt \(supported majors: 22\/24\/25\)/);
+
+    // Guards apply to the DEFAULT only: an explicit `node` selection is
+    // honored verbatim (the bootstrap's stage-0 preflight owns the loud error).
+    mkdirSync(join(ws, ".coherence"), { recursive: true });
+    writeFileSync(join(ws, ".coherence", "coordinator_backend"), "node\n", "utf8");
+    const explicit = spawnSync("/bin/bash", [join(root, "bin", "ensure-coordinator-dispatch")], {
+      cwd: ws,
+      encoding: "utf8",
+      env: { PATH: path23, HOME: ws } as NodeJS.ProcessEnv,
+      timeout: 10000,
+    });
+    assert.equal(explicit.stdout.trim(), "NODE-BOOTSTRAP");
+  } finally {
+    cleanup();
+    rmSync(ws, { recursive: true, force: true });
   }
 });
 
