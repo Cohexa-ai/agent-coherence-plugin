@@ -27,11 +27,7 @@ import { createServer, BIND_HOST } from "./server.js";
 import { ArtifactRegistry } from "./registry.js";
 import { PolicyRef } from "./policy.js";
 import { SessionRegistry } from "./sessions.js";
-
-// Kept in sync manually with package.json/.claude-plugin/{plugin,marketplace}.json.
-// TODO(ce-review safe_auto follow-up): import from package.json via resolveJsonModule
-// once tsconfig is updated so check_versions_synced.js can guard a single source of truth.
-const VERSION = "0.1.1";
+import { readPackageVersion } from "./version.js";
 
 interface Workspace {
   root: string;
@@ -77,6 +73,9 @@ function logInfo(message: string): void {
 
 async function main(): Promise<void> {
   const startedAtMs = Date.now();
+  // Read before any filesystem side effects: an unreadable package.json means
+  // a broken install, surfaced via the main().catch fatal path below.
+  const version = readPackageVersion();
   const workspace = resolveWorkspace();
 
   mkdirSync(workspace.coherenceDir, { recursive: true, mode: 0o700 });
@@ -116,7 +115,7 @@ async function main(): Promise<void> {
   const server = createServer({
     secret,
     startedAtMs,
-    version: VERSION,
+    version,
     registry,
     policy,
     sessions,

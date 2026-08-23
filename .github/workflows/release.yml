@@ -17,7 +17,11 @@ permissions:
   contents: read
 
 env:
-  NODE_VERSION: "20"
+  # Must stay inside package.json's `engines.node` (^22 || ^24 || ^25) — the
+  # majors with a better-sqlite3 prebuilt for the locked 12.x line. Node 20
+  # left that range when its prebuilt was dropped, which would fail `npm ci`
+  # in the build job on every tag push. Track engines.node when it moves.
+  NODE_VERSION: "22"
 
 jobs:
   preflight:
@@ -43,10 +47,13 @@ jobs:
       # The readiness tool ships with Unit 9. If it has not landed yet, this step
       # is a no-op rather than a hard failure so the workflow remains useful for
       # earlier tagged releases.
+      # RELEASE_TAG activates the tool's manifest-version == tag assertion
+      # (check 4: package.json / plugin.json / marketplace.json / tag).
       - name: Verify release-readiness configuration
         if: hashFiles('tools/check_release_readiness.js') != ''
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ github.ref_name }}
         run: node tools/check_release_readiness.js
 
   build:

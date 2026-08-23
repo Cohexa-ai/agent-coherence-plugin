@@ -84,7 +84,7 @@ Everything below is a **library console script** installed by `pip install "agen
 | `agent-coherence-migrate-rules` | Scan CLAUDE.md for prose tool-class rules; propose + optionally `--apply` `permissions.deny` entries | First-pass migration of `"use rg, not grep"`-style rules to enforceable policy |
 | `agent-coherence-migrate-deny` *(library v0.8.2+)* | Stricter sibling: STDOUT-only, symlink-contained, never invokes an LLM, never writes settings.json | Security-sensitive workspaces; CI-driven migration where auto-apply is not acceptable |
 
-To bridge the two, the plugin ships PATH-resolver shims at `bin/agent-coherence-{status,track,untrack,migrate-deny}`. The CLI shims prefer the bundled Node CLI (`dist/cli_*.js`) and fall back to probing for the Python binary (PATH first, then `<cwd>/.venv/bin/`, then `<git-root>/.venv/bin/`) before an actionable error — so the slash commands work whether or not the operator activated the project venv before launching `claude`, including Claude UI / remote-control sessions that inherit a system shell env without venv activation. Two more shims handle dispatch: `bin/ensure-coordinator-dispatch` is the backend-aware `SessionStart` bootstrap (selects the Node or Python coordinator), and `bin/hook-client` is the universal per-hook shim (Node client preferred, Python client fallback, `{}` fail-open floor).
+To bridge the two, the plugin ships PATH-resolver shims at `bin/agent-coherence-{status,track,untrack,migrate-deny}`. The CLI shims prefer the plugin's Node CLI (`dist/cli_*.js` — from the package itself in a built dev checkout, otherwise from the copy provisioned into the plugin data dir at `SessionStart`; marketplace installs ship no prebuilt `dist/`) and fall back to probing for the Python binary (PATH first, then `<cwd>/.venv/bin/`, then `<git-root>/.venv/bin/`) before an actionable error — so the slash commands work whether or not the operator activated the project venv before launching `claude`, including Claude UI / remote-control sessions that inherit a system shell env without venv activation. Two more shims handle dispatch: `bin/ensure-coordinator-dispatch` is the backend-aware `SessionStart` bootstrap (selects the Node or Python coordinator), and `bin/hook-client` is the universal per-hook shim (Node client preferred, Python client fallback, `{}` fail-open floor).
 
 ## Getting started
 
@@ -123,7 +123,7 @@ command -v agent-coherence-coordinator
 command -v agent-coherence-hook-client
 ```
 
-**B. Node backend (zero-Python — the default for fresh workspaces).** The plugin's bundled `dist/` runs all six hooks, the track/untrack/status CLIs, and strict mode with **no Python required** (needs **Node ≥ 20**, where `better-sqlite3` ships prebuilts). A fresh workspace selects this automatically; to opt an **existing** workspace in explicitly:
+**B. Node backend (zero-Python — the default for fresh workspaces).** The plugin's Node coordinator — built from the packaged `src/` into the plugin data dir on first session (marketplace installs ship no prebuilt `dist/`) — runs all six hooks, the track/untrack/status CLIs, and strict mode with **no Python required** (needs **Node 22, 24, or 25** — the majors where `better-sqlite3` ships prebuilts). A fresh workspace selects this automatically; to opt an **existing** workspace in explicitly:
 
 ```bash
 mkdir -p .coherence && printf 'node\n' > .coherence/coordinator_backend
@@ -221,7 +221,7 @@ Two processes:
 Two coordinator backends:
 
 - **Python** — canonical, richest feature set. Ships in the `agent-coherence` library on PyPI.
-- **Node** — self-sufficient (needs **no Python**): all six hooks, the track/untrack/status CLIs, and strict mode, all at wire-parity with Python. Ships in this plugin's `dist/`.
+- **Node** — self-sufficient (needs **no Python**): all six hooks, the track/untrack/status CLIs, and strict mode, all at wire-parity with Python. Ships as `src/` in this plugin and is built into the plugin data dir at first-session provisioning (a built dev checkout's `dist/` is used as-is).
 
 **Selecting the backend.** The default is **`node` for a fresh workspace** and **`python` for an established one** — resolved at `SessionStart` as: `COHERENCE_COORDINATOR_BACKEND` env → `<repo>/.coherence/coordinator_backend` file → guarded default. The default is guarded two ways, and both apply **only** when you haven't chosen explicitly:
 
@@ -234,7 +234,7 @@ To choose explicitly (honored verbatim, guards bypassed), set the env var `COHER
 mkdir -p .coherence && printf 'node\n' > .coherence/coordinator_backend
 ```
 
-The env var takes precedence; an unknown value falls back to `python`. (This file — not a Claude Code plugin setting — is the selection mechanism; the Node zero-Python guarantee is scoped to the platforms with a prebuilt `better-sqlite3` for the pinned Node ABI range. The floor is **Node 20** — `better-sqlite3` dropped Node 18 — so `engines.node` is `>=20 <25`; on Node 18 the plugin still runs on the Python backend, or on Node with a local toolchain to compile `better-sqlite3`.)
+The env var takes precedence; an unknown value falls back to `python`. (This file — not a Claude Code plugin setting — is the selection mechanism; the Node zero-Python guarantee is scoped to the platforms with a prebuilt `better-sqlite3` for the pinned Node ABI range. That range is **Node 22, 24, or 25** (`engines.node` = `^22.0.0 || ^24.0.0 || ^25.0.0`): `better-sqlite3` 12.10.0 dropped its Node 20 prebuilts — Node 20 reached end-of-life 2026-04-30 — and never ships them for odd pre-25 majors, so on any other major the bootstrap **refuses up front** rather than fall back to node-gyp, which would need Python and a C++ toolchain. On those majors the plugin runs on the Python backend — a fresh workspace falls back to it automatically, with a stderr note saying why.)
 
 Both backends speak the same HTTP wire contract; the [`tests/protocol_corpus/`](https://github.com/Cohexa-ai/agent-coherence/tree/main/tests/protocol_corpus) suite in the library repo catches drift. Switch backends safely via `agent-coherence-coordinator --prepare-for-migration`. The canonical design lives in the library's `docs/plans/` directory.
 

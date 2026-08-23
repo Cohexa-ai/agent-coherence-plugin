@@ -1,12 +1,12 @@
 {
   "name": "agent-coherence-plugin-coordinator",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "description": "Node coordinator for the agent-coherence Claude Code plugin \u2014 MESI-subset port of the Python coordinator for one-click marketplace install. Coexists with the Python coordinator per coherence.coordinator_backend setting.",
   "private": true,
   "type": "module",
   "main": "dist/coordinator.js",
   "engines": {
-    "node": ">=20.0.0 <25"
+    "node": "^22.0.0 || ^24.0.0 || ^25.0.0"
   },
   "scripts": {
     "build": "tsc",
