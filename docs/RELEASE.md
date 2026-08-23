@@ -76,6 +76,56 @@ gh api -X PUT repos/Cohexa-ai/agent-coherence-plugin/branches/dev/protection \
 JSON
 ```
 
+### Configure the `protect-main` branch ruleset
+
+`main` is protected by **two independent systems**, and both must pass. This is the single most confusing thing about this repository's configuration, so read this before debugging any "why won't this merge" question:
+
+| Layer | Configured by | Admin bypass |
+|---|---|---|
+| Classic branch protection | `/branches/main/protection` (above) | via `enforce_admins: false` |
+| `protect-main` ruleset | `/rulesets` (below) | via the ruleset's own bypass list |
+
+**A ruleset bypass actor does not exempt you from classic branch protection, and vice versa.** They are evaluated separately. A PR showing "Review required" while you hold ruleset bypass is being blocked by the *classic* layer.
+
+The ruleset's bypass list must contain **Repository admin** (`bypass_mode: always`); without it, no release can merge, because the review requirement above is unsatisfiable. Bypass actors are not settable through this endpoint's payload — add them in **Settings → Rules → protect-main → Bypass list**, and verify with:
+
+```bash
+gh api repos/Cohexa-ai/agent-coherence-plugin/rulesets --jq '.[] | select(.name=="protect-main") | .id' \
+  | xargs -I{} gh api repos/Cohexa-ai/agent-coherence-plugin/rulesets/{} \
+    --jq '{methods: (.rules[]|select(.type=="pull_request")|.parameters.allowed_merge_methods), rules: [.rules[].type], bypass: [.bypass_actors[].actor_type]}'
+```
+
+**`allowed_merge_methods` must include `merge`, and `required_linear_history` must NOT be present.** §2 step 2 merges the release with a merge commit; a squash-only ruleset makes that procedure unexecutable, and `required_linear_history` forbids merge commits outright. v0.4.0 shipped with the ruleset in exactly that state, which is why it was squash-merged and why `dev` then needed a manual reconcile (PR #112) — the recurring conflict §2 step 2 warns about. To correct it:
+
+```bash
+gh api -X PUT repos/Cohexa-ai/agent-coherence-plugin/rulesets/$(gh api repos/Cohexa-ai/agent-coherence-plugin/rulesets --jq '.[] | select(.name=="protect-main") | .id') \
+  --input - <<'JSON'
+{
+  "name": "protect-main",
+  "target": "branch",
+  "enforcement": "active",
+  "conditions": {"ref_name": {"include": ["~DEFAULT_BRANCH"], "exclude": []}},
+  "rules": [
+    {"type": "deletion"},
+    {"type": "non_fast_forward"},
+    {"type": "pull_request", "parameters": {
+      "allowed_merge_methods": ["merge", "squash"],
+      "dismiss_stale_reviews_on_push": false,
+      "dismissal_restriction": {"allowed_actors": [], "enabled": false},
+      "require_code_owner_review": false,
+      "require_extra_approval_for_unattributed_changes": true,
+      "require_last_push_approval": false,
+      "required_approving_review_count": 1,
+      "required_review_thread_resolution": true,
+      "required_reviewers": []
+    }}
+  ]
+}
+JSON
+```
+
+Nothing verifies this automatically — `tools/check_release_readiness.js` checks the *tag* ruleset (below), not this one. If a release merge is ever rejected on merge method, this is the cause.
+
 ### Configure tag protection ruleset for `refs/tags/v*`
 
 Only admins can push release tags. Deletion and non-fast-forward updates are blocked.
@@ -141,7 +191,9 @@ Replace `X.Y.Z` with the target version (e.g. `0.3.2`) throughout.
 
    Confirmed on the v0.4.0 release, 2026-08-23. Preserving `dev`'s commit SHAs on `main` is not achievable under this branching model, so the tag identifies the release by tree, not by SHA lineage.
 
-   **Do not use `--squash` either.** It would collapse the release into a single commit with no ancestry link to `dev`, permanently diverging the two branches and turning §3's forward-merge into a recurring conflict.
+   **Do not use `--squash` either.** It would collapse the release into a single commit with no ancestry link to `dev`, permanently diverging the two branches and turning §3's forward-merge into a recurring conflict. This is not hypothetical: v0.4.0 was squash-merged, and the next forward-merge came back as `add/add` conflicts across every file the release touched, needing a hand-resolved reconcile (PR #112).
+
+   **If the merge is rejected on merge method**, the `protect-main` ruleset is squash-only — fix it per §1 before continuing. That is the state v0.4.0 shipped in.
 
 3. **Sync local `main`.**
 
