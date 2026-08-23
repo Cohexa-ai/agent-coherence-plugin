@@ -6,6 +6,18 @@ Alpha — APIs and the `hooks.json` wire shape may change before `v1.0`.
 
 The canonical release-notes surface is [GitHub Releases](https://github.com/Cohexa-ai/agent-coherence-plugin/releases); this file mirrors that history in a structured format for operators who prefer a single browsable timeline.
 
+## [Unreleased]
+
+### Fixed
+
+- **The Node coordinator could never start from a marketplace install — provisioning now builds `src/` when the package ships no `dist/`, and startup failures are loud.** A marketplace install is a git clone and `dist/` is gitignored, so **no released package (0.2.1, 0.3.1) ever contained the compiled coordinator** — the release workflow's `dist.tar.gz` is a GitHub-Release asset the marketplace flow never consumes. `bin/ensure-coordinator-node` mirrored the nonexistent `dist/`, spawned the nonexistent entry point, printed a success line (`spawned Node coordinator (pid=…)`) and exited 0 while the coordinator crash-looped `MODULE_NOT_FOUND` into `coordinator.log` on every session — a silent no-op of every hook surface, on exactly the fresh installs the 0.3.1 Node-default flip exists to serve. (CI never saw it because every job runs `npm run build` before exercising the bootstrap.) Stage 2 now mirrors `dist/` when the package has one (dev checkouts) and otherwise **builds `src/` → `${CLAUDE_PLUGIN_DATA}/dist` at provision time** with the `tsc` from PLUGIN_DATA's dev-inclusive `npm install` (or the plugin cache's own), keyed like Stage 1 (rebuild on package change or missing entry; a failed build retries next session). The bootstrap also **verifies the entry point exists before spawning** and gates the success message behind a **post-spawn liveness check** that surfaces the crash log's tail instead of reporting a dead pid as started.
+- **`bin/hook-client` and the `status`/`track`/`untrack` CLI shims now also resolve their Node client from the provisioned `${CLAUDE_PLUGIN_DATA}/dist`.** All four probed only the package's own `dist/` — absent on every marketplace install — so even with a live coordinator the hook calls fell through to the Python client or the silent `{}` fail-open floor, and the slash-command CLIs to the Python probes: the coordinator ran while every hook surface still no-oped. The package's own `dist/` (dev checkout) still wins when present.
+- **A Node-provisioned workspace no longer flips back to the `python` default on its second session.** The coordinator's own first boot creates `.coherence/state.db`, which the dispatcher's established-workspace guard read as "pre-existing (likely Python-owned) store → default `python`" — so the Node default worked for exactly one session, then silently degraded after the next reboot on the zero-Python machines it exists for. After the first successful provision of a virgin workspace, `ensure-coordinator-node` now stamps `.coherence/coordinator_backend` = `node` (the explicit selection resolves before the guard; an operator's existing file is never overwritten, and a failed boot never stamps).
+
+### Added
+
+- Regression coverage for the marketplace shape: `src/test/node_bootstrap_provision.test.ts` (a dist-less package must self-provision a **live** coordinator; provisioning and startup failures must exit 1 with no false "spawned" line; backend-stamp semantics) and a `marketplace-provision` CI job that boots the real coordinator from a `git archive` tree — tracked files only, no pre-build — across the fresh-provision, same-boot attach, and post-reboot re-spawn sessions.
+
 ## [0.3.1] — 2026-07-31
 
 **Default-backend flip for fresh workspaces + documentation-accuracy fixes.** No coordinator, hook, or wire-contract changes.
