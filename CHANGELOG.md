@@ -6,6 +6,12 @@ Alpha — APIs and the `hooks.json` wire shape may change before `v1.0`.
 
 The canonical release-notes surface is [GitHub Releases](https://github.com/Cohexa-ai/agent-coherence-plugin/releases); this file mirrors that history in a structured format for operators who prefer a single browsable timeline.
 
+## [Unreleased]
+
+### Fixed
+
+- **`.claude-plugin/marketplace.json` still declared `0.3.0` after the v0.3.1 release.** PR [#95](https://github.com/Cohexa-ai/agent-coherence-plugin/pull/95) bumped `package.json` and `plugin.json` only; the pre-commit hook that checks the sync is advisory, and the release workflow compared the tag against `package.json` alone, so the drift shipped. The marketplace entry now reads `0.3.1`.
+
 ## [0.3.1] — 2026-07-31
 
 **Default-backend flip for fresh workspaces + documentation-accuracy fixes.** No coordinator, hook, or wire-contract changes.
