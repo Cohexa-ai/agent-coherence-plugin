@@ -35,8 +35,12 @@
 #      step 2, before this guard. Without the stamp, the coordinator's own
 #      first boot (which creates state.db) would flip the workspace to the
 #      python default on the very next session.
-#   b. Runtime guard. The Node bootstrap needs `node` AND `npm` on PATH. If
-#      either is missing, fall back to `python` rather than dead-ending.
+#   b. Runtime guard. The Node bootstrap needs `node` AND `npm` on PATH, and
+#      a Node major with a better-sqlite3 prebuilt (22/24/25 — on any other
+#      major `npm install` falls back to node-gyp, i.e. Python, violating the
+#      zero-Python guarantee; ensure-coordinator-node refuses it at stage 0).
+#      If any of that is missing, fall back to `python` rather than
+#      dead-ending a fresh workspace with a bootstrap that cannot succeed.
 #
 # Both guards apply to the DEFAULT only. An EXPLICIT `node` (env or file) is
 # honored verbatim — the operator's choice, and the backends surface their own
@@ -49,6 +53,17 @@
 set -uo pipefail
 
 self_dir="$(cd "$(dirname "$0")" 2>/dev/null && pwd -P)"
+
+# Majors with a better-sqlite3 prebuilt for the locked dependency (12.10.0
+# dropped Node 20/ABI 115 and Node 23/ABI 131). KEEP IN SYNC with
+# engines.node in package.json and the stage-0 preflight in
+# ensure-coordinator-node.
+node_abi_supported() {
+  case "$(node -p 'process.versions.node.split(".")[0]' 2>/dev/null || true)" in
+    22 | 24 | 25) return 0 ;;
+    *) return 1 ;;
+  esac
+}
 
 backend="${COHERENCE_COORDINATOR_BACKEND:-}"
 if [ -z "$backend" ]; then
@@ -73,10 +88,15 @@ if [ -z "$backend" ]; then
       # (Node-born stores never reach this arm — the Node bootstrap's
       # first-provision stamp resolves them explicitly at the file step.)
       backend="python"
-    elif command -v node >/dev/null 2>&1 && command -v npm >/dev/null 2>&1; then
+    elif command -v node >/dev/null 2>&1 && command -v npm >/dev/null 2>&1 && node_abi_supported; then
       # (b) Fresh workspace with a usable Node runtime → the zero-Python path.
       backend="node"
     else
+      if command -v node >/dev/null 2>&1 && command -v npm >/dev/null 2>&1; then
+        # Node exists but has no better-sqlite3 prebuilt — say why the
+        # zero-Python default was skipped, then take the working path.
+        echo "agent-coherence: node $(node --version 2>/dev/null || echo '?') has no better-sqlite3 prebuilt (supported majors: 22/24/25); defaulting to the python backend" >&2
+      fi
       backend="python"
     fi
   fi

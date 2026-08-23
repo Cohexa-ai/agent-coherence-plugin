@@ -39,6 +39,31 @@ set -uo pipefail
 
 mkdir -p "${CLAUDE_PLUGIN_DATA}"
 
+# Stage 0: Node-ABI preflight. The zero-Python guarantee (decision B) holds
+# only where better-sqlite3 ships a prebuilt binary for this Node ABI; on any
+# other major, Stage 1's `npm install` falls back to node-gyp — which needs
+# Python and a C++ toolchain, the exact dependencies this backend exists to
+# avoid. better-sqlite3 12.10.0 dropped the Node 20 (ABI 115) and Node 23
+# (ABI 131) prebuilts, so the supported majors are 22 / 24 / 25 (ABIs
+# 127 / 137 / 141). KEEP IN SYNC with engines.node in package.json and the
+# dispatcher's node_abi_supported() — package.json stays the enforced source
+# of truth via --engine-strict on the install below.
+NODE_VERSION_RAW="$(node --version 2>/dev/null || echo unknown)"
+NODE_MAJOR="$(printf '%s' "$NODE_VERSION_RAW" | sed -n 's/^v\{0,1\}\([0-9][0-9]*\)\..*$/\1/p')"
+case "$NODE_MAJOR" in
+  22 | 24 | 25) ;;
+  *)
+    {
+      echo "agent-coherence: Node ${NODE_VERSION_RAW} is not supported by the Node coordinator."
+      echo "agent-coherence: better-sqlite3 ships prebuilt binaries only for Node 22, 24, and 25;"
+      echo "agent-coherence: other majors fall back to node-gyp (Python + C++ toolchain), which the"
+      echo "agent-coherence: zero-Python install guarantee forbids. Install Node 22 or 24 (LTS), or"
+      echo "agent-coherence: select the Python backend: echo python > .coherence/coordinator_backend"
+    } >&2
+    exit 1
+    ;;
+esac
+
 # Workspace resolution (per-workspace state per KTD-C) + a virgin-store
 # marker for the post-spawn backend stamp. The marker MUST be read before
 # Stage 4 — the coordinator's own first boot creates state.db within
@@ -62,9 +87,14 @@ if ! diff -q "${CLAUDE_PLUGIN_ROOT}/package.json" "${CLAUDE_PLUGIN_DATA}/package
   if [ -f "${CLAUDE_PLUGIN_ROOT}/package-lock.json" ]; then
     cp "${CLAUDE_PLUGIN_ROOT}/package-lock.json" "${CLAUDE_PLUGIN_DATA}/" || true
   fi
-  if ! (cd "${CLAUDE_PLUGIN_DATA}" && npm install --no-audit --no-fund --no-progress 2>&1); then
+  # --engine-strict turns the engines.node range into a hard install-time
+  # gate (npm only warns by default), so the Stage-0 list above can never
+  # silently drift past package.json.
+  if ! (cd "${CLAUDE_PLUGIN_DATA}" && npm install --engine-strict --no-audit --no-fund --no-progress 2>&1); then
     rm -f "${CLAUDE_PLUGIN_DATA}/package.json"
     echo "agent-coherence: npm install failed; coordinator will not start this session. Next session retries." >&2
+    echo "agent-coherence: (a 'No prebuilt binaries found' / node-gyp trace above means this Node major" >&2
+    echo "agent-coherence: lacks a better-sqlite3 prebuilt — supported majors: 22 / 24 / 25.)" >&2
     exit 1
   fi
 fi
