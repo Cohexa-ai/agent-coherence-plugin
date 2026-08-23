@@ -17,7 +17,11 @@ permissions:
   contents: read
 
 env:
-  NODE_VERSION: "20"
+  # Must stay inside package.json's `engines.node` (^22 || ^24 || ^25) — the
+  # majors with a better-sqlite3 prebuilt for the locked 12.x line. Node 20
+  # left that range when its prebuilt was dropped, which would fail `npm ci`
+  # in the build job on every tag push. Track engines.node when it moves.
+  NODE_VERSION: "22"
 
 jobs:
   preflight:
