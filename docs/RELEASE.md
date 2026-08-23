@@ -35,7 +35,7 @@ git checkout -b dev && git push -u origin dev
 
 Require PR review + the CI status check contexts. Strict mode means the PR branch must be up to date with `main` before merging.
 
-The context names below MUST match the job display names in `.github/workflows/ci.yml` verbatim — GitHub matches on the `name:` field of each job (and per-matrix variant). Update this list if the workflow's job names change.
+The context names below MUST match the job display names in `.github/workflows/ci.yml` verbatim — GitHub matches on the `name:` field of each job (and per-matrix variant). Update this list if the workflow's job names change. `node tools/check_release_readiness.js` verifies the live required contexts against ci.yml and fails on drift (a stale context blocks every PR merge behind an admin override), so run it after any matrix or job-name change and re-apply these PUT commands with the new names.
 
 ```bash
 gh api -X PUT repos/Cohexa-ai/agent-coherence-plugin/branches/main/protection \
@@ -43,7 +43,7 @@ gh api -X PUT repos/Cohexa-ai/agent-coherence-plugin/branches/main/protection \
 {
   "required_status_checks": {
     "strict": true,
-    "contexts": ["Typecheck", "Tests (Node 20)", "Tests (Node 22)", "Zero-Python install (Node 20)", "Zero-Python install (Node 22)", "Marketplace-shaped provision (dist-less package)", "Build Package"]
+    "contexts": ["Typecheck", "Tests (Node 22)", "Tests (Node 24)", "Tests (Node 25)", "Zero-Python install (Node 22)", "Zero-Python install (Node 24)", "Zero-Python install (Node 25)", "Marketplace-shaped provision (dist-less package)", "Build Package"]
   },
   "enforce_admins": false,
   "required_pull_request_reviews": {
@@ -65,7 +65,7 @@ gh api -X PUT repos/Cohexa-ai/agent-coherence-plugin/branches/dev/protection \
 {
   "required_status_checks": {
     "strict": true,
-    "contexts": ["Typecheck", "Tests (Node 20)", "Tests (Node 22)", "Zero-Python install (Node 20)", "Zero-Python install (Node 22)", "Marketplace-shaped provision (dist-less package)", "Build Package"]
+    "contexts": ["Typecheck", "Tests (Node 22)", "Tests (Node 24)", "Tests (Node 25)", "Zero-Python install (Node 22)", "Zero-Python install (Node 24)", "Zero-Python install (Node 25)", "Marketplace-shaped provision (dist-less package)", "Build Package"]
   },
   "enforce_admins": false,
   "required_pull_request_reviews": null,
