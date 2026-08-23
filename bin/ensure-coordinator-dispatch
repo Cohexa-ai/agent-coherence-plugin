@@ -28,6 +28,13 @@
 #      degrade this change exists to remove. Established workspaces therefore
 #      keep `python` until the operator opts in (or runs
 #      `agent-coherence-coordinator --prepare-for-migration`).
+#      NOTE: workspaces the Node default itself initializes are NOT caught by
+#      this heuristic — ensure-coordinator-node stamps
+#      `.coherence/coordinator_backend` = node after its first successful
+#      provision of a virgin workspace, and that explicit file resolves at
+#      step 2, before this guard. Without the stamp, the coordinator's own
+#      first boot (which creates state.db) would flip the workspace to the
+#      python default on the very next session.
 #   b. Runtime guard. The Node bootstrap needs `node` AND `npm` on PATH. If
 #      either is missing, fall back to `python` rather than dead-ending.
 #
@@ -63,6 +70,8 @@ if [ -z "$backend" ]; then
     if [ -n "$root" ] && [ -f "$root/.coherence/state.db" ]; then
       # (a) Established workspace: its store may be Python-owned, and the Node
       # coordinator fails closed on a foreign ledger. Keep the old default.
+      # (Node-born stores never reach this arm — the Node bootstrap's
+      # first-provision stamp resolves them explicitly at the file step.)
       backend="python"
     elif command -v node >/dev/null 2>&1 && command -v npm >/dev/null 2>&1; then
       # (b) Fresh workspace with a usable Node runtime → the zero-Python path.

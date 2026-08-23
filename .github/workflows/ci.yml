@@ -109,6 +109,75 @@ jobs:
             echo "No compiled tests in dist/test/ — skipping."
           fi
 
+  marketplace-provision:
+    name: Marketplace-shaped provision (dist-less package)
+    runs-on: ubuntu-latest
+
+    # Every other job runs `npm ci` + `npm run build` before touching the
+    # bootstrap — but a marketplace install is a git clone, and dist/ is
+    # gitignored, so the shipped package NEVER contains compiled output.
+    # v0.2.1/v0.3.1 shipped with a SessionStart bootstrap that spawned the
+    # nonexistent dist/coordinator.js, reported success, and crash-looped
+    # MODULE_NOT_FOUND forever. This job runs the real SessionStart entry
+    # point against a `git archive` tree (exactly the marketplace shape,
+    # with NO package-side npm install) and requires a LIVE coordinator.
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Materialize the marketplace-shaped package (tracked files only)
+        run: |
+          mkdir -p /tmp/plugin-pkg
+          git archive HEAD | tar -x -C /tmp/plugin-pkg
+          test ! -d /tmp/plugin-pkg/dist
+          test ! -d /tmp/plugin-pkg/node_modules
+
+      - name: SessionStart bootstrap must yield a LIVE coordinator
+        run: |
+          export CLAUDE_PLUGIN_ROOT=/tmp/plugin-pkg
+          export CLAUDE_PLUGIN_DATA=/tmp/plugin-data
+          mkdir -p /tmp/ws && cd /tmp/ws && git init -q .
+          set +e
+          bash "$CLAUDE_PLUGIN_ROOT/bin/ensure-coordinator-dispatch" >hook.out 2>hook.err
+          ec=$?
+          set -e
+          echo "--- hook stdout ---"; cat hook.out
+          echo "--- hook stderr ---"; cat hook.err
+          test "$ec" -eq 0
+          grep -q "spawned Node coordinator" hook.err
+          test -f /tmp/plugin-data/dist/coordinator.js
+          pid=$(sed -n 's/.*pid=\([0-9]\{1,\}\).*/\1/p' hook.err | head -1)
+          sleep 2
+          kill -0 "$pid"
+          echo "--- workspace .coherence after boot ---"; ls -la .coherence 2>/dev/null || true
+          # First provision must stamp the backend so the dispatcher's
+          # state.db guard cannot reroute session 2 to the python default.
+          test "$(cat .coherence/coordinator_backend)" = "node"
+          # The hook client must resolve its Node client from the provisioned
+          # PLUGIN_DATA dist (the package has none) and complete a real wire
+          # round-trip — a fresh pre-read of a default-tracked artifact.
+          echo hello > CLAUDE.md
+          printf '{"session_id":"44444444-4444-4444-8444-444444444444","tool_input":{"file_path":"%s/CLAUDE.md"}}' "$PWD" \
+            | bash "$CLAUDE_PLUGIN_ROOT/bin/hook-client" pre-read > client.out
+          echo "--- hook-client pre-read ---"; cat client.out
+          grep -q "fresh" client.out
+          # Session 2 (same boot): dispatcher must stay on node and attach.
+          bash "$CLAUDE_PLUGIN_ROOT/bin/ensure-coordinator-dispatch" 2>hook2.err
+          echo "--- session 2 stderr ---"; cat hook2.err
+          grep -q "coordinator already running" hook2.err
+          # "Reboot": kill the coordinator; the next session must re-spawn
+          # the NODE coordinator (not silently fall back to python).
+          kill "$pid"; sleep 1
+          bash "$CLAUDE_PLUGIN_ROOT/bin/ensure-coordinator-dispatch" 2>hook3.err
+          echo "--- session 3 stderr ---"; cat hook3.err
+          grep -q "spawned Node coordinator" hook3.err
+          pid3=$(sed -n 's/.*pid=\([0-9]\{1,\}\).*/\1/p' hook3.err | head -1)
+          kill "$pid3"
+
   build:
     name: Build Package
     runs-on: ubuntu-latest

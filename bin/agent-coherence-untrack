@@ -28,12 +28,19 @@ self_dir="$(cd "$(dirname "$0")" 2>/dev/null && pwd -P)"
 
 # Probe 0 (zero-Python Unit 5): prefer the plugin's bundled Node CLI — it
 # uses only node: builtins (no node_modules, no pip) and is backend-agnostic
-# (talks to whichever coordinator holds .coherence/server.pid). The Python
-# console-script probes below remain as the no-node fallback.
+# (talks to whichever coordinator holds .coherence/server.pid). Probed in
+# the package's own dist/ (dev checkout) THEN the PLUGIN_DATA copy that
+# ensure-coordinator-node provisions at SessionStart — a marketplace install
+# is a git clone and dist/ is gitignored, so there the DATA copy is the only
+# Node CLI that exists. The Python console-script probes below remain as the
+# no-node fallback.
 plugin_root="${CLAUDE_PLUGIN_ROOT:-$(dirname "$self_dir")}"
-node_cli="${plugin_root}/dist/cli_untrack.js"
-if command -v node >/dev/null 2>&1 && [ -f "$node_cli" ]; then
-  exec node "$node_cli" "$@"
+if command -v node >/dev/null 2>&1; then
+  for node_cli in "${plugin_root}/dist/cli_untrack.js" "${CLAUDE_PLUGIN_DATA:-}/dist/cli_untrack.js"; do
+    if [ -f "$node_cli" ]; then
+      exec node "$node_cli" "$@"
+    fi
+  done
 fi
 
 # Probe 1: iterate PATH, exec the first candidate that isn't ourselves.

@@ -84,7 +84,7 @@ Everything below is a **library console script** installed by `pip install "agen
 | `agent-coherence-migrate-rules` | Scan CLAUDE.md for prose tool-class rules; propose + optionally `--apply` `permissions.deny` entries | First-pass migration of `"use rg, not grep"`-style rules to enforceable policy |
 | `agent-coherence-migrate-deny` *(library v0.8.2+)* | Stricter sibling: STDOUT-only, symlink-contained, never invokes an LLM, never writes settings.json | Security-sensitive workspaces; CI-driven migration where auto-apply is not acceptable |
 
-To bridge the two, the plugin ships PATH-resolver shims at `bin/agent-coherence-{status,track,untrack,migrate-deny}`. The CLI shims prefer the bundled Node CLI (`dist/cli_*.js`) and fall back to probing for the Python binary (PATH first, then `<cwd>/.venv/bin/`, then `<git-root>/.venv/bin/`) before an actionable error — so the slash commands work whether or not the operator activated the project venv before launching `claude`, including Claude UI / remote-control sessions that inherit a system shell env without venv activation. Two more shims handle dispatch: `bin/ensure-coordinator-dispatch` is the backend-aware `SessionStart` bootstrap (selects the Node or Python coordinator), and `bin/hook-client` is the universal per-hook shim (Node client preferred, Python client fallback, `{}` fail-open floor).
+To bridge the two, the plugin ships PATH-resolver shims at `bin/agent-coherence-{status,track,untrack,migrate-deny}`. The CLI shims prefer the plugin's Node CLI (`dist/cli_*.js` — from the package itself in a built dev checkout, otherwise from the copy provisioned into the plugin data dir at `SessionStart`; marketplace installs ship no prebuilt `dist/`) and fall back to probing for the Python binary (PATH first, then `<cwd>/.venv/bin/`, then `<git-root>/.venv/bin/`) before an actionable error — so the slash commands work whether or not the operator activated the project venv before launching `claude`, including Claude UI / remote-control sessions that inherit a system shell env without venv activation. Two more shims handle dispatch: `bin/ensure-coordinator-dispatch` is the backend-aware `SessionStart` bootstrap (selects the Node or Python coordinator), and `bin/hook-client` is the universal per-hook shim (Node client preferred, Python client fallback, `{}` fail-open floor).
 
 ## Getting started
 
@@ -123,7 +123,7 @@ command -v agent-coherence-coordinator
 command -v agent-coherence-hook-client
 ```
 
-**B. Node backend (zero-Python — the default for fresh workspaces).** The plugin's bundled `dist/` runs all six hooks, the track/untrack/status CLIs, and strict mode with **no Python required** (needs **Node ≥ 20**, where `better-sqlite3` ships prebuilts). A fresh workspace selects this automatically; to opt an **existing** workspace in explicitly:
+**B. Node backend (zero-Python — the default for fresh workspaces).** The plugin's Node coordinator — built from the packaged `src/` into the plugin data dir on first session (marketplace installs ship no prebuilt `dist/`) — runs all six hooks, the track/untrack/status CLIs, and strict mode with **no Python required** (needs **Node ≥ 20**, where `better-sqlite3` ships prebuilts). A fresh workspace selects this automatically; to opt an **existing** workspace in explicitly:
 
 ```bash
 mkdir -p .coherence && printf 'node\n' > .coherence/coordinator_backend
@@ -221,7 +221,7 @@ Two processes:
 Two coordinator backends:
 
 - **Python** — canonical, richest feature set. Ships in the `agent-coherence` library on PyPI.
-- **Node** — self-sufficient (needs **no Python**): all six hooks, the track/untrack/status CLIs, and strict mode, all at wire-parity with Python. Ships in this plugin's `dist/`.
+- **Node** — self-sufficient (needs **no Python**): all six hooks, the track/untrack/status CLIs, and strict mode, all at wire-parity with Python. Ships as `src/` in this plugin and is built into the plugin data dir at first-session provisioning (a built dev checkout's `dist/` is used as-is).
 
 **Selecting the backend.** The default is **`node` for a fresh workspace** and **`python` for an established one** — resolved at `SessionStart` as: `COHERENCE_COORDINATOR_BACKEND` env → `<repo>/.coherence/coordinator_backend` file → guarded default. The default is guarded two ways, and both apply **only** when you haven't chosen explicitly:
 
