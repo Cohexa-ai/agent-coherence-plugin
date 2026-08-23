@@ -16,7 +16,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
 import { spawn, spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
@@ -247,13 +247,17 @@ test(
         encoding: "utf8",
         timeout: 300000,
         env: {
-          // NOTE: /usr/bin stays on PATH for coreutils, so on macOS this does
-          // NOT fully mask /usr/bin/python3 — locally this test is indicative
-          // (prebuilt fetch succeeds without invoking node-gyp). The
-          // authoritative run is CI executing this in a python-less Linux
-          // container per supported Node ABI (decision B).
+          // NOTE: /usr/bin stays on PATH for coreutils, so this does NOT
+          // mask /usr/bin/python3 from PATH — and masking alone was never
+          // enough anyway: node-gyp's find-python treats npm_config_python /
+          // PYTHON as SOFT candidates and falls through to system python3
+          // when they fail. NODE_GYP_FORCE_PYTHON is the one HARD override
+          // (it becomes the sole candidate), so any node-gyp fallback dies
+          // instead of silently compiling with system Python. Belt: this
+          // env. Braces: the config.gypi assertion below.
           PATH: `${emptyDir}:${nodeDir}:/usr/bin:/bin`,
           HOME: root,
+          NODE_GYP_FORCE_PYTHON: "/nonexistent",
           CLAUDE_PLUGIN_ROOT: pluginRoot,
           CLAUDE_PLUGIN_DATA: join(root, "plugin-data"),
         } as NodeJS.ProcessEnv,
@@ -273,6 +277,23 @@ test(
           // already exited
         }
       }
+      // Decision B discriminator (the vacuous-gate lesson): prebuild-install
+      // extracts EXACTLY build/Release/better_sqlite3.node, while a node-gyp
+      // source build — the Python-needing fallback — first writes
+      // build/config.gypi at configure time. The .node present proves the
+      // module installed; config.gypi absent proves it arrived as a prebuilt
+      // and NOT via a silent local compile with system Python.
+      const bs3 = join(root, "plugin-data", "node_modules", "better-sqlite3");
+      assert.equal(
+        existsSync(join(bs3, "build", "Release", "better_sqlite3.node")),
+        true,
+        "prebuilt better_sqlite3.node missing after bootstrap install",
+      );
+      assert.equal(
+        existsSync(join(bs3, "build", "config.gypi")),
+        false,
+        "build/config.gypi present — better-sqlite3 was compiled from source via node-gyp, violating decision B",
+      );
     } finally {
       // maxRetries absorbs the brief window between SIGKILL and the OS
       // releasing the daemon's open SQLite/WAL/log handles.

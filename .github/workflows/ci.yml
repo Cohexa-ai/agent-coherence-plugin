@@ -11,7 +11,7 @@ permissions:
   contents: read
 
 env:
-  NODE_VERSION: "20"
+  NODE_VERSION: "22"
 
 jobs:
   typecheck:
@@ -46,7 +46,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        node-version: ["20", "22"]
+        # The majors with better-sqlite3 prebuilts for the locked 12.x —
+        # keep in sync with engines.node in package.json.
+        node-version: ["22", "24", "25"]
 
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
@@ -80,17 +82,24 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        node-version: ["20", "22"]
+        # Every major in engines.node must hold the install-time guarantee.
+        node-version: ["22", "24", "25"]
 
     # Decision B: the zero-Python guarantee is that `better-sqlite3` installs
     # from a prebuilt for the pinned ABIs — never falling back to node-gyp,
-    # which needs Python. Masking Python (npm_config_python / PYTHON → a bad
-    # path) makes a node-gyp fallback FAIL loudly instead of silently
-    # succeeding on the runner's system Python. The runtime smoke test can't
-    # catch this; the install must.
+    # which needs Python. NODE_GYP_FORCE_PYTHON is the only HARD override
+    # node-gyp honors: find-python treats npm_config_python / PYTHON as soft
+    # candidates and silently falls through to the runner's /usr/bin/python3
+    # when they are invalid ("ignore errors, keep trying until Python is
+    # found") — which let a source-build fallback pass this job unnoticed.
+    # With FORCE set to a bad path it becomes the SOLE candidate, so any
+    # node-gyp invocation dies immediately. The soft masks stay as
+    # defense-in-depth. The runtime smoke test can't catch this; the install
+    # must (plus the config.gypi assertion in zero_python_smoke.test.ts).
     env:
       npm_config_python: /nonexistent
       PYTHON: /nonexistent
+      NODE_GYP_FORCE_PYTHON: /nonexistent
 
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
