@@ -26,6 +26,13 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
 
+      # Fail fast on manifest version drift (needs no npm install). The
+      # pre-commit hook running the same check is advisory-only — v0.3.1
+      # shipped with marketplace.json still at 0.3.0 because nothing in CI
+      # enforced it.
+      - name: Check manifest versions synced
+        run: node tools/check_versions_synced.js
+
       - name: Install dependencies
         run: npm ci
 

@@ -9,7 +9,7 @@
  * (`agent-coherence`). Run before any `v*` tag push to confirm the GitHub
  * side is configured for fail-closed publishing.
  *
- * Three checks (each shells out to `gh api`):
+ * Four checks (1–3 shell out to `gh api`; 4 is filesystem-only):
  *
  *   1. main branch protection is configured. 404 → fail (run setup commands
  *      in docs/RELEASE.md §1). 403 → warn (CI token lacks admin scope).
@@ -23,6 +23,13 @@
  *      active ruleset, and verifies `conditions.ref_name.include` covers
  *      `refs/tags/v*`. 403 → warn.
  *
+ *   4. package.json, .claude-plugin/plugin.json, and
+ *      .claude-plugin/marketplace.json declare one identical version, and —
+ *      when RELEASE_TAG is set (release.yml preflight exports
+ *      `github.ref_name`) — the tag equals `v<version>`. Local pre-tag runs
+ *      skip only the tag comparison. Added after v0.3.1 shipped with
+ *      marketplace.json still at 0.3.0.
+ *
  * Exit code: 0 if all pass or only warnings; 1 if any fail.
  *
  * Invoked manually before tag push (`node tools/check_release_readiness.js`)
@@ -35,6 +42,7 @@ import { execSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
+import { evaluateVersionSync } from './check_versions_synced.js';
 
 const FALLBACK_SLUG = 'Cohexa-ai/agent-coherence-plugin';
 const TAG_PATTERN = 'v*';
@@ -288,6 +296,17 @@ function checkTagRuleset(slug) {
 }
 
 // -----------------------------------------------------------------------------
+// Check 4: manifest version sync (package.json / plugin.json / marketplace.json / tag)
+// -----------------------------------------------------------------------------
+
+function checkVersionSync() {
+  const name = 'manifest version sync';
+  const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+  const verdict = evaluateVersionSync(repoRoot, process.env.RELEASE_TAG);
+  return result(name, verdict.ok ? PASS : FAIL, verdict.detail);
+}
+
+// -----------------------------------------------------------------------------
 // Reporting
 // -----------------------------------------------------------------------------
 
@@ -325,6 +344,7 @@ function main() {
     checkMainBranchProtection(slug),
     checkDevBranchProtection(slug),
     checkTagRuleset(slug),
+    checkVersionSync(),
   ];
   printReport(slug, results);
   const failed = results.some((r) => r.level === FAIL);
