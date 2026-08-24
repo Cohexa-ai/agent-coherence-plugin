@@ -18,6 +18,23 @@ import { v5 as uuidv5 } from "uuid";
 const NAMESPACE_URL = "6ba7b811-9dad-11d1-80b4-00c04fd430c8";
 
 /**
+ * ADV-004 sentinel preempter id, written into `pending_notices` when the
+ * coordinator's stable-grant sweep — not a peer session — reclaimed an M/E
+ * grant. Node ships no sweep, but `pending_notices` is an on-disk table a
+ * Python coordinator may have written for the same workspace, so the
+ * renderer must still recognize the sentinel rather than print its first
+ * eight hex digits as if they were a session. Derived from the same
+ * namespace + name as Python `SWEEP_RECLAMATION_PREEMPTER_ID`
+ * (coordinator_server.py) and verified equal: e91bfe9cc2855071bf958d64a2bde624.
+ */
+export const SWEEP_RECLAMATION_PREEMPTER_ID = uuidv5(
+  "ccs-coordinator-sweep:stable-grant-reclamation",
+  NAMESPACE_URL,
+)
+  .replace(/-/g, "")
+  .toLowerCase();
+
+/**
  * Single source of truth for the subagent-id charset/length rule (SB-25).
  * Shared by the server-side reader (`readSubagentId`) AND the client-side
  * subagent-stop guard (`buildSubagentStop`) so the "must never release the

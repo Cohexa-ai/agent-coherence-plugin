@@ -10,7 +10,6 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { MESIState } from "../states.js";
 import { emitStrictDeny, nowUnix, type StaleSummary } from "../hook_payloads.js";
-import { drainNoticeText } from "./pre_bash.js";
 import {
   type HookDeps,
   writeJson,
@@ -20,6 +19,7 @@ import {
   isValidPath,
   nowTick as nowTickFn,
   readSubagentId,
+  drainNoticeText,
 } from "./_common.js";
 
 interface PreGrepBody {

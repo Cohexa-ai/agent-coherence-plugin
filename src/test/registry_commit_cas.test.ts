@@ -50,7 +50,7 @@ test("commitCas WIN: matching version, no peer holder → version+1, committer S
   }
 });
 
-test("commitCas WIN invalidates SHARED peers + queues notices", () => {
+test("commitCas WIN invalidates SHARED peers WITHOUT queueing a notice", () => {
   const { registry, cleanup } = makeRegistry();
   try {
     const id = registry.resolveOrRegisterArtifact("plan.md", HASH_1);
@@ -60,9 +60,11 @@ test("commitCas WIN invalidates SHARED peers + queues notices", () => {
     if (out.kind !== "win") return;
     assert.deepEqual(out.invalidatedPeers, [AGENT_B]);
     assert.equal(registry.getAgentState(id, AGENT_B), MESIState.INVALID);
-    const notices = registry.popPendingNoticesForAgent(AGENT_B);
-    assert.equal(notices.length, 1);
-    assert.equal(notices[0]!.preempterAgentId, AGENT_A);
+    // B held SHARED — outside the M∪E notice predicate. A notice here would
+    // tell a reader with no write grant that its EXCLUSIVE grant was revoked,
+    // which is both false and a Python-parity break (Python records notices
+    // only for the M∪E snapshot taken in pre-edit).
+    assert.deepEqual(registry.popPendingNoticesForAgent(AGENT_B), []);
   } finally {
     cleanup();
   }

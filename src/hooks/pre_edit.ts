@@ -22,7 +22,6 @@ import {
   buildCollisionResponse,
   emitStrictDeny,
   nowUnix,
-  preemptionNoticeText,
   type StaleSummary,
 } from "../hook_payloads.js";
 import {
@@ -33,6 +32,7 @@ import {
   isValidSessionId,
   isValidPath,
   readSubagentId,
+  drainNoticeText,
 } from "./_common.js";
 
 export type PreEditDeps = HookDeps;
@@ -127,22 +127,7 @@ export async function handlePreEdit(
 
   // Pop any pending notices for THIS session — they accumulated from prior
   // preemptions before this pre-edit. Merge into the response.
-  const popped = deps.registry.popPendingNoticesForAgent(agentId);
-  const noticeText =
-    popped.length === 0
-      ? null
-      : preemptionNoticeText(
-          popped.map((n) => {
-            const art = deps.registry.getArtifactById(n.artifactId);
-            const preempterSession =
-              deps.sessions.agentIdToSessionId(n.preempterAgentId) ?? "<unknown>";
-            return {
-              artifactPath: art?.name ?? "<unknown-artifact>",
-              preempterSessionShort: preempterSession.slice(0, 8),
-              preemptedAtUnixTs: n.preemptedAtUnixTs,
-            };
-          }),
-        );
+  const noticeText = drainNoticeText(deps, agentId);
 
   // If we silently preempted someone in M/E, surface a collision warning.
   // Per Python convention: permissionDecision stays "allow" in v0.1.1 warn-only;

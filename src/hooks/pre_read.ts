@@ -24,7 +24,6 @@ import {
   buildFreshWithNotice,
   emitStrictDeny,
   nowUnix,
-  preemptionNoticeText,
   type StaleSummary,
 } from "../hook_payloads.js";
 
@@ -41,6 +40,7 @@ import {
   isValidPath,
   isValidContentHashOrAbsent,
   readSubagentId,
+  drainNoticeText,
 } from "./_common.js";
 
 export type PreReadDeps = HookDeps;
@@ -97,7 +97,7 @@ export async function handlePreRead(
     deps.registry.grantShared(artifactId, agentId, nowTick, "first_read");
     // Even on first observation, check if THIS session has pending notices
     // from prior interactions on OTHER artifacts.
-    const notice = buildAdditionalNoticeText(deps, agentId);
+    const notice = drainNoticeText(deps, agentId);
     if (notice !== null) {
       writeJson(res, 200, buildFreshWithNotice(notice));
       return;
@@ -163,7 +163,7 @@ export async function handlePreRead(
     }
     // Reader has a valid grant (SHARED, EXCLUSIVE, or MODIFIED) on the
     // current version. Fresh.
-    const notice = buildAdditionalNoticeText(deps, agentId);
+    const notice = drainNoticeText(deps, agentId);
     if (notice !== null) {
       writeJson(res, 200, buildFreshWithNotice(notice));
       return;
@@ -227,34 +227,12 @@ export async function handlePreRead(
   const resp = buildStaleResponse(summary);
   // A1: if THIS session has pending preemption notices, prepend them to the
   // additionalContext.
-  const notice = buildAdditionalNoticeText(deps, agentId);
+  const notice = drainNoticeText(deps, agentId);
   if (notice !== null) {
     resp.hookSpecificOutput.additionalContext =
       notice + "\n\n" + resp.hookSpecificOutput.additionalContext;
   }
   writeJson(res, 200, resp);
-}
-
-/**
- * Pop pending-preemption notices for the given agent and render them as
- * additional-context prose. Returns null if no notices pending. Mirrors
- * Python `_build_preemption_text`.
- */
-function buildAdditionalNoticeText(deps: PreReadDeps, agentId: string): string | null {
-  const popped = deps.registry.popPendingNoticesForAgent(agentId);
-  if (popped.length === 0) return null;
-  // Resolve artifact name + preempter session for each notice. Best-effort
-  // — if either is unknown, fall back to "<unknown>".
-  const rendered = popped.map((n) => {
-    const art = deps.registry.getArtifactById(n.artifactId);
-    const preempterSession = deps.sessions.agentIdToSessionId(n.preempterAgentId) ?? "<unknown>";
-    return {
-      artifactPath: art?.name ?? "<unknown-artifact>",
-      preempterSessionShort: preempterSession.slice(0, 8),
-      preemptedAtUnixTs: n.preemptedAtUnixTs,
-    };
-  });
-  return preemptionNoticeText(rendered);
 }
 
 /** Parse + dispatch helper for use from server.ts. */

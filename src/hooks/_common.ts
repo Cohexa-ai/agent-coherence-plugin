@@ -12,6 +12,7 @@ import type { ArtifactRegistry } from "../registry.js";
 import type { PolicyRef } from "../policy.js";
 import type { SessionRegistry } from "../sessions.js";
 import { isValidSubagentId } from "../agent_id.js";
+import { preemptionNoticeText } from "../hook_payloads.js";
 
 export interface HookDeps {
   registry: ArtifactRegistry;
@@ -43,6 +44,30 @@ export function writeError(res: ServerResponse, status: number, message: string)
  */
 export function nowTick(): number {
   return Math.floor(Date.now() / 1000);
+}
+
+/**
+ * Drain this agent's pending preemption notices and render them as
+ * additionalContext prose, or null when none are pending.
+ *
+ * Single site for the resolution step (artifact id → path, preempter agent id
+ * → session short) that pre-read, pre-edit, pre-bash and pre-grep all need:
+ * four copies of it is how the sweep-sentinel branch ends up applied on some
+ * surfaces and not others.
+ */
+export function drainNoticeText(deps: HookDeps, agentId: string): string | null {
+  const popped = deps.registry.popPendingNoticesForAgent(agentId);
+  if (popped.length === 0) return null;
+  return preemptionNoticeText(
+    popped.map((n) => ({
+      artifactPath: deps.registry.getArtifactById(n.artifactId)?.name ?? "<unknown-artifact>",
+      preempterAgentId: n.preempterAgentId,
+      preempterSessionShort: (
+        deps.sessions.agentIdToSessionId(n.preempterAgentId) ?? "<unknown>"
+      ).slice(0, 8),
+      preemptedAtUnixTs: n.preemptedAtUnixTs,
+    })),
+  );
 }
 
 /**

@@ -16,6 +16,7 @@
  * Per KTD-13: NEVER include content bytes, content hashes, or diff text
  * in the response surface. Stale-read summary is structural metadata only.
  */
+import { SWEEP_RECLAMATION_PREEMPTER_ID } from "./agent_id.js";
 
 export interface StaleSummary {
   path: string;
@@ -223,27 +224,69 @@ export function editCollisionWarning(
 }
 
 /**
- * Build the preemption-notice additionalContext text for a session whose
- * grant was silently revoked by a peer. Mirrors Python's
- * `_build_preemption_text`.
+ * F3 hardening (Python `_PREEMPTION_PROSE_VERBATIM_CAP`): render at most this
+ * many notices verbatim and coalesce the rest into one overflow line, so the
+ * block stays a constant size regardless of N and leaves room under Claude
+ * Code's 10KB additionalContext cap for a prepended stale-read warning.
  */
-export function preemptionNoticeText(
-  notices: ReadonlyArray<{
-    artifactPath: string;
-    preempterSessionShort: string;
-    preemptedAtUnixTs: number;
-  }>,
-): string {
+const PREEMPTION_PROSE_VERBATIM_CAP = 3;
+
+/** One pending notice, resolved to the fields the prose renders. */
+export interface RenderableNotice {
+  artifactPath: string;
+  /** Raw preempter agent id — compared against the ADV-004 sweep sentinel. */
+  preempterAgentId: string;
+  preempterSessionShort: string;
+  preemptedAtUnixTs: number;
+}
+
+/**
+ * Build the preemption-notice additionalContext text for a session whose M/E
+ * grant was silently revoked. Byte-identical to Python `_build_preemption_text`
+ * (coordinator_server.py), which is the reference implementation: this prose is
+ * the whole signal telling a model its edit was stranded, so the two backends
+ * must not word it differently. Newest first; sweep reclamation named as such
+ * rather than as a peer session.
+ */
+export function preemptionNoticeText(notices: ReadonlyArray<RenderableNotice>): string {
   if (notices.length === 0) return "";
-  const lines = notices.map(
-    (n) =>
-      `  • ${n.artifactPath} preempted by session ${n.preempterSessionShort} at ${isoUtc(n.preemptedAtUnixTs)}`,
+  // Stable sort (ES2019+) newest-first, matching Python's stable `sorted(...,
+  // reverse=True)` — equal timestamps keep the order the registry returned.
+  const sorted = [...notices].sort((a, b) => b.preemptedAtUnixTs - a.preemptedAtUnixTs);
+  const verbatim = sorted.slice(0, PREEMPTION_PROSE_VERBATIM_CAP);
+  const overflow = sorted.slice(PREEMPTION_PROSE_VERBATIM_CAP);
+
+  const lines: string[] = ["⚠ Coordinator notice: your EXCLUSIVE grant was preempted:"];
+  for (const n of verbatim) {
+    if (n.preempterAgentId === SWEEP_RECLAMATION_PREEMPTER_ID) {
+      lines.push(
+        `  • ${n.artifactPath} — reclaimed by the coordinator sweep ` +
+          `(heartbeat timeout or max-hold ceiling) at ${isoUtc(n.preemptedAtUnixTs)}. ` +
+          `Any local edit you made to this file will land in your ` +
+          `worktree but is NOT reflected in the coordinator's version. ` +
+          `Re-fetch via pre-read and retry.`,
+      );
+      continue;
+    }
+    lines.push(
+      `  • ${n.artifactPath} — preempted/revoked by session ${n.preempterSessionShort} ` +
+        `at ${isoUtc(n.preemptedAtUnixTs)}. Any local edit you made to this file will land ` +
+        `in your worktree but is NOT reflected in the coordinator's version.`,
+    );
+  }
+  if (overflow.length > 0) {
+    lines.push(
+      `  • Plus ${overflow.length} more preemptions since your last activity; ` +
+        `run \`/agent-coherence status\` (or query GET /status on the coordinator) ` +
+        `for the full list.`,
+    );
+  }
+  lines.push(
+    "Re-read affected files before continuing if you need the latest " +
+      "coordinator-tracked version, or proceed knowing your edits remain " +
+      "local-only until you re-acquire and commit.",
   );
-  const intro =
-    notices.length === 1
-      ? "⚠ Your EXCLUSIVE grant on this artifact was silently revoked by another session:"
-      : `⚠ ${notices.length} of your EXCLUSIVE grants were silently revoked by other sessions:`;
-  return `${intro}\n${lines.join("\n")}`;
+  return lines.join("\n");
 }
 
 export function buildStaleResponse(summary: StaleSummary): StaleResponse {

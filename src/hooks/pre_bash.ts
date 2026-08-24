@@ -15,12 +15,7 @@
  */
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { MESIState } from "../states.js";
-import {
-  emitStrictDeny,
-  nowUnix,
-  preemptionNoticeText,
-  type StaleSummary,
-} from "../hook_payloads.js";
+import { emitStrictDeny, nowUnix, type StaleSummary } from "../hook_payloads.js";
 import { detectTrackedPaths } from "./bash_path_detector.js";
 import {
   type HookDeps,
@@ -30,6 +25,7 @@ import {
   isValidSessionId,
   nowTick as nowTickFn,
   readSubagentId,
+  drainNoticeText,
 } from "./_common.js";
 
 const MAX_COMMAND_LENGTH = 16384;
@@ -37,22 +33,6 @@ const MAX_COMMAND_LENGTH = 16384;
 interface PreBashBody {
   session_id?: unknown;
   command?: unknown;
-}
-
-/** Drain + render this agent's pending preemption notices (mirrors pre_read's helper). */
-export function drainNoticeText(deps: HookDeps, agentId: string): string | null {
-  const popped = deps.registry.popPendingNoticesForAgent(agentId);
-  if (popped.length === 0) return null;
-  const rendered = popped.map((n) => {
-    const art = deps.registry.getArtifactById(n.artifactId);
-    const preempterSession = deps.sessions.agentIdToSessionId(n.preempterAgentId) ?? "<unknown>";
-    return {
-      artifactPath: art?.name ?? "<unknown-artifact>",
-      preempterSessionShort: preempterSession.slice(0, 8),
-      preemptedAtUnixTs: n.preemptedAtUnixTs,
-    };
-  });
-  return preemptionNoticeText(rendered);
 }
 
 export async function handlePreBash(

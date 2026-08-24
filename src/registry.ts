@@ -273,8 +273,9 @@ export class ArtifactRegistry {
    * (per KTD-10 MESI subset: no transient states, no event bus).
    *
    * Side effects (all in one BEGIN IMMEDIATE):
-   * - For each peer in {M, E, S}: UPSERT agent_states to INVALID; UPSERT a
-   *   pending_notice with `agentId` as preempter and `nowUnixTs`.
+   * - For each peer in {M, E, S}: UPSERT agent_states to INVALID. Peers in
+   *   {M, E} additionally get a pending_notice with `agentId` as preempter
+   *   (see `upsertPendingNotice` for why SHARED peers do not).
    * - UPSERT agent_states[agentId] to EXCLUSIVE; stamp granted_at_tick.
    * - checkSingleWriter on the post-mutation state map → rollback if
    *   violated.
@@ -302,7 +303,9 @@ export class ArtifactRegistry {
           );
         }
         this.setAgentStateInternal(artifactId, peerId, peerState, MESIState.INVALID, nowTick, "write");
-        this.upsertPendingNotice(peerId, artifactId, agentId, nowTick);
+        if (peerState === MESIState.MODIFIED || peerState === MESIState.EXCLUSIVE) {
+          this.upsertPendingNotice(peerId, artifactId, agentId, Date.now() / 1000);
+        }
         invalidatedPeers.push(peerId);
       }
 
@@ -350,8 +353,10 @@ export class ArtifactRegistry {
    * - Verify agent_states[agentId] ∈ {EXCLUSIVE, MODIFIED}; raise otherwise
    * - Bump artifacts.version (monotonicity invariant check)
    * - Update artifacts.content_hash, last_writer_id, updated_at
-   * - For each peer ≠ agentId in {S}: UPSERT agent_states to INVALID + pending_notice
-   *   (any M/E peers would already be INVALID via acquireExclusive — they don't recur)
+   * - For each peer ≠ agentId in {S}: UPSERT agent_states to INVALID. No
+   *   pending_notice: the peers reachable here are SHARED readers, which are
+   *   outside the M∪E notice predicate (any M/E peer would already be INVALID
+   *   via the acquireExclusive that preceded this commit).
    * - UPSERT agent_states[agentId] to MODIFIED
    * - checkSingleWriter
    *
@@ -411,7 +416,6 @@ export class ArtifactRegistry {
           );
         }
         this.setAgentStateInternal(artifactId, peerId, peerState, MESIState.INVALID, nowTick, "commit");
-        this.upsertPendingNotice(peerId, artifactId, agentId, nowTick);
         invalidatedPeers.push(peerId);
       }
 
@@ -539,8 +543,9 @@ export class ArtifactRegistry {
         )
         .run(nextVersion, newContentHash, sizeTokens, agentId, Date.now() / 1000, artifactId);
 
-      // Invalidate every non-INVALID peer (SHARED readers; M/E was excluded
-      // above) + queue a preemption notice — same shape as commit().
+      // Invalidate every non-INVALID peer — same shape as commit(). No
+      // preemption notice: M/E was excluded by the other_holder check above,
+      // so every peer reachable here is a SHARED reader.
       const stateMap = this.getStateMap(artifactId);
       const invalidatedPeers: string[] = [];
       for (const [peerId, peerState] of stateMap) {
@@ -550,7 +555,6 @@ export class ArtifactRegistry {
           throw new Error(`commitCas: peer ${peerId} in ${peerState} cannot transition to INVALID`);
         }
         this.setAgentStateInternal(artifactId, peerId, peerState, MESIState.INVALID, nowTick, "commit_cas");
-        this.upsertPendingNotice(peerId, artifactId, agentId, nowTick);
         invalidatedPeers.push(peerId);
       }
 
@@ -801,6 +805,18 @@ export class ArtifactRegistry {
    * second preemption on the same (victim, artifact) replaces the prior
    * notice — latest preempter wins (matches Python sqlite_registry.py:937
    * `INSERT … ON CONFLICT DO UPDATE WHERE excluded.preempted_at_unix_ts > …`).
+   *
+   * Callers MUST restrict this to victims that held MODIFIED or EXCLUSIVE,
+   * matching Python `_handle_pre_edit`'s `_peers_in_me_excluding` snapshot.
+   * The notice's whole message is "your write grant was revoked and your local
+   * edit is stranded" — a SHARED reader had no write grant and stranded
+   * nothing, so noticing it would both misdescribe its state and duplicate the
+   * stale-read warning it already gets on its next read.
+   *
+   * `nowUnixTs` is fractional seconds (`Date.now() / 1000`), not the integer
+   * `nowTick`: the ON CONFLICT guard discriminates on it, so truncating to
+   * whole seconds would drop two preemptions in the same second down to
+   * whichever landed first, and Python writes a float into this same column.
    */
   private upsertPendingNotice(
     victimAgentId: string,
