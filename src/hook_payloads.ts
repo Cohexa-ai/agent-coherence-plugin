@@ -29,7 +29,15 @@ export interface StaleSummary {
 
 export interface HookSpecificOutput {
   hookEventName: "PreToolUse";
-  permissionDecision: "allow" | "deny" | "ask";
+  /**
+   * OPTIONAL (SB-10 review correction): a PreToolUse envelope may carry
+   * `additionalContext` with NO decision at all — Claude Code renders the
+   * context and leaves its own permission flow untouched. The advisory
+   * post-compaction re-grounding payload uses exactly that shape, so this
+   * key must be omissible; see `attachReground` in hooks/reground.ts for
+   * the rule and its empirical basis. Every DECIDING emitter still sets it.
+   */
+  permissionDecision?: "allow" | "deny" | "ask";
   /**
    * OPTIONAL (Unit 6 review correction): Python's `emit_strict_deny` returns
    * NO `additionalContext` key at all, and `emit_allow` includes it only

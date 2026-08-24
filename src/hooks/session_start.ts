@@ -56,9 +56,11 @@ export type SessionStartDeps = HookDeps;
  * SB-10 (R5): at most this many artifact lines render verbatim; the rest
  * coalesce into one overflow line pointing at the status surface. Mirrors
  * Python `_SESSION_START_ARTIFACT_VERBATIM_CAP` — keeps the payload
- * constant-size regardless of how many artifacts a session touched,
- * comfortably under Claude Code's 10KB additionalContext ceiling even when
- * the preemption-notice block is prepended.
+ * constant-size regardless of how many artifacts a session touched. The
+ * same cap bounds the prepended preemption-notice block, whose notices are
+ * flattened across the parent and every registered subagent: without it the
+ * payload would be unbounded and the 10KB additionalContext ceiling only a
+ * hope.
  */
 export const SESSION_START_ARTIFACT_VERBATIM_CAP = 3;
 
@@ -67,16 +69,17 @@ interface SessionStartBody {
 }
 
 /**
- * Literal `{key}` template substitution. Split/join (not String.replace)
- * so replacement values containing `$` patterns can never corrupt the
- * prose — the templates are the byte-parity contract.
+ * Literal `{key}` template substitution in ONE pass over the template, so a
+ * substituted value is never re-scanned — a tracked path carrying a brace
+ * token (`docs/{current}/plan.md` passes isValidPath) must render verbatim,
+ * exactly as Python's single-pass `str.format` renders it. The replacer
+ * form also keeps values containing `$` patterns from corrupting the prose
+ * — the templates are the byte-parity contract.
  */
 function fmt(template: string, subs: Record<string, string>): string {
-  let out = template;
-  for (const [key, value] of Object.entries(subs)) {
-    out = out.split(`{${key}}`).join(value);
-  }
-  return out;
+  return template.replace(/\{(\w+)\}/g, (match: string, key: string) =>
+    Object.hasOwn(subs, key) ? subs[key] : match,
+  );
 }
 
 interface SessionStartContext {
@@ -108,7 +111,8 @@ interface SessionStartContext {
  *   edits are exempt — KTD4's second layer — and no 0-sentinel compares);
  * - at most `SESSION_START_ARTIFACT_VERBATIM_CAP` artifact lines render
  *   verbatim, the rest coalesce into the overflow line (R5) — a group
- *   fully swallowed by the cap renders no subagent prefix;
+ *   fully swallowed by the cap renders no subagent prefix; the notice
+ *   block honours the same cap with its own overflow line;
  * - the self-qualifying closing line is always last. No timestamps.
  *
  * Exported for SB-10 U8: the deferred-delivery seam rebuilds the prose from
@@ -127,8 +131,10 @@ export function buildSessionStartContext(
   const sortedArtifacts = [...artifacts].sort((a, b) =>
     a.name < b.name ? -1 : a.name > b.name ? 1 : 0,
   );
-  // One unfiltered SELECT covers every (artifact, agent) pair; the `?.get`
-  // consumers below tolerate an artifact with no outer entry.
+  // One unfiltered SELECT covers every (artifact, agent) pair — state AND
+  // recorded last-observed version together, so the staleness test below
+  // never re-prepares a per-pair statement inside this synchronous walk.
+  // The `?.get` consumers tolerate an artifact with no outer entry.
   const stateByArtifact = deps.registry.allStateMaps();
 
   const notices: Array<{ artifactId: string; preempterAgentId: string; preemptedAtUnixTs: number }> =
@@ -151,8 +157,9 @@ export function buildSessionStartContext(
           preemptedAtUnixTs: pending.preemptedAtUnixTs,
         });
       }
-      const state = stateByArtifact.get(art.id)?.get(agentId);
-      if (state === undefined) continue;
+      const snapshot = stateByArtifact.get(art.id)?.get(agentId);
+      if (snapshot === undefined) continue;
+      const state = snapshot.state;
       const path = art.name;
       const current = art.version;
       if (state !== MESIState.INVALID) {
@@ -161,7 +168,7 @@ export function buildSessionStartContext(
         );
         continue;
       }
-      const last = deps.registry.lastObservedVersionFor(art.id, agentId);
+      const last = snapshot.lastObserved;
       const stale = last !== null && current > last && art.last_writer_id !== agentId;
       if (stale) {
         lines.push(
@@ -189,16 +196,32 @@ export function buildSessionStartContext(
   let noticeText: string | null = null;
   if (notices.length > 0) {
     const artifactNameById = new Map(sortedArtifacts.map((a) => [a.id, a.name]));
+    // R5 size bound: `notices` is flattened across the parent AND every
+    // registered subagent, so it needs the same verbatim cap the artifact
+    // lines carry — `preemptionNoticeText` renders one bullet per notice
+    // with no cap of its own and its admit-path bytes must not move.
+    // Collection order is preserved (never re-sorted), so any payload at or
+    // under the cap keeps its exact bytes.
+    const verbatimNotices = notices.slice(0, SESSION_START_ARTIFACT_VERBATIM_CAP);
     noticeText = preemptionNoticeText(
-      notices.map((n) => {
+      verbatimNotices.map((n) => {
         const preempterSession = deps.sessions.agentIdToSessionId(n.preempterAgentId) ?? "<unknown>";
         return {
           artifactPath: artifactNameById.get(n.artifactId) ?? "<unknown-artifact>",
+          // Raw preempter id, not the resolved session: the prose builder
+          // matches it against the sweep-reclamation sentinel so a coordinator
+          // sweep is named as such rather than rendered as a peer session.
+          preempterAgentId: n.preempterAgentId,
           preempterSessionShort: preempterSession.slice(0, 8),
           preemptedAtUnixTs: n.preemptedAtUnixTs,
         };
       }),
     );
+    const noticeOverflow = notices.length - verbatimNotices.length;
+    if (noticeOverflow > 0) {
+      noticeText +=
+        "\n" + fmt(SESSION_START_OVERFLOW_LINE_TEMPLATE, { count: String(noticeOverflow) });
+    }
   }
 
   const rendered: string[] = [SESSION_START_HEADER];

@@ -81,6 +81,17 @@ export type CasOutcome =
     }
   | { kind: "corruption"; currentVersion: number };
 
+/**
+ * One (artifact, agent) row as the session-start walk needs it: the MESI
+ * state plus the recorded last-observed version (null when the pair never
+ * observed bytes — absence is NULL, never a 0-sentinel). Batched by
+ * `allStateMaps` so the walk never re-queries per pair.
+ */
+export interface AgentStateSnapshot {
+  readonly state: MESIState;
+  readonly lastObserved: number | null;
+}
+
 // ArtifactRow / rowToArtifact removed (ce-review maintainability finding):
 // the SQLite row shape and the Artifact interface were byte-identical;
 // the mapper was an identity function. We cast directly to `Artifact` at
@@ -259,24 +270,34 @@ export class ArtifactRegistry {
   }
 
   /**
-   * Per-agent MESI state maps for EVERY artifact in one SELECT — the
+   * Per-agent state snapshots for EVERY artifact in one SELECT — the
    * batched form of `getStateMap` for the session-start builder's
-   * all-artifacts walk (N per-artifact SELECTs collapse to one). An
+   * all-artifacts walk (N per-artifact SELECTs collapse to one). Carries
+   * `last_observed_version` in the SAME row so the walk's staleness test
+   * never re-prepares `lastObservedVersionFor` per INVALID pair. An
    * artifact no agent ever touched has no outer entry; consumers tolerate
    * the missing entry.
    */
-  allStateMaps(): Map<string, Map<string, MESIState>> {
+  allStateMaps(): Map<string, Map<string, AgentStateSnapshot>> {
     const rows = this.db
-      .prepare(`SELECT artifact_id, agent_id, state FROM agent_states`)
-      .all() as { artifact_id: string; agent_id: string; state: string }[];
-    const byArtifact = new Map<string, Map<string, MESIState>>();
+      .prepare(`SELECT artifact_id, agent_id, state, last_observed_version FROM agent_states`)
+      .all() as {
+      artifact_id: string;
+      agent_id: string;
+      state: string;
+      last_observed_version: number | null;
+    }[];
+    const byArtifact = new Map<string, Map<string, AgentStateSnapshot>>();
     for (const r of rows) {
       let inner = byArtifact.get(r.artifact_id);
       if (inner === undefined) {
-        inner = new Map<string, MESIState>();
+        inner = new Map<string, AgentStateSnapshot>();
         byArtifact.set(r.artifact_id, inner);
       }
-      inner.set(r.agent_id, toMESIState(r.state));
+      inner.set(r.agent_id, {
+        state: toMESIState(r.state),
+        lastObserved: r.last_observed_version,
+      });
     }
     return byArtifact;
   }

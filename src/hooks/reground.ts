@@ -6,8 +6,10 @@
  * coordinator_server.py). The compact-pending flag armed by
  * /hooks/session-start is claimed — atomic test-and-clear — at the
  * allow-attach seam shared by the four admit surfaces (pre-read, pre-edit,
- * pre-bash, pre-grep), and the payload rides the PreToolUse allow envelope,
- * never the SessionStart wrapper.
+ * pre-bash, pre-grep), and the payload rides a PreToolUse envelope, never
+ * the SessionStart wrapper. It only ever ADDS context: a bare admit gets a
+ * context-only envelope, an existing envelope keeps its own decision (see
+ * `attachReground`).
  *
  * R2 at-most-once: the claim happens ONLY here, after every deny decision.
  * Node's single-threaded event loop already makes the Map-delete pop atomic,
@@ -20,7 +22,7 @@
  * moment of attach — never a snapshot cached at compact time.
  */
 import type { ServerResponse } from "node:http";
-import { emitAllow, type HookSpecificOutput } from "../hook_payloads.js";
+import type { HookSpecificOutput } from "../hook_payloads.js";
 import { type HookDeps, hasSubagentIdField, writeJson } from "./_common.js";
 import { buildSessionStartContext } from "./session_start.js";
 
@@ -78,20 +80,40 @@ function claimRegroundContext(
 
 /**
  * Merge the claimed re-grounding prose into a qualifying admit response.
- * An existing allow envelope keeps its text and gets the block appended
- * AFTER it (notices and stale warnings render first — KTD6 ordering); a
- * bare admit body is promoted to an allow envelope. The deferred path rides
- * the PreToolUse allow wrapper — never the SessionStart shape.
+ * An existing envelope keeps its text and its decision and gets the block
+ * appended AFTER it (notices and stale warnings render first — KTD6
+ * ordering); a bare admit body gets a CONTEXT-ONLY PreToolUse envelope —
+ * `hookEventName` + `additionalContext`, no `permissionDecision`.
+ *
+ * WHY context-only (SB-10 review finding): an advisory payload must NEVER
+ * widen a permission decision. `permissionDecision: "allow"` short-circuits
+ * Claude Code's own permission prompting for that tool call, so promoting a
+ * bare untracked admit (the fast-path `{ok:true}` / `{status:"fresh"}` body,
+ * which carries no decision of its own) to an allow envelope would, once per
+ * compaction, auto-approve an untracked bash or edit that would otherwise
+ * have prompted the user — purely as a side effect of re-grounding delivery.
+ * Re-grounding is advisory (KD3): it may add context, never authority.
+ *
+ * Empirically safe: an A/B capture against Claude Code CLI 2.1.233 showed a
+ * PreToolUse `hookSpecificOutput` carrying `additionalContext` with NO
+ * `permissionDecision` has its context rendered to the model (the primed
+ * model quoted the injected line verbatim); the control arm that also
+ * stamped `allow` behaved identically. Minting an allow buys nothing and
+ * costs a permission gate.
+ *
+ * The deferred path rides the PreToolUse wrapper — never the SessionStart
+ * shape. Wire-shape parity with Python `_attach_reground` is load-bearing
+ * (protocol corpus): same key set, same insertion order.
  */
 function attachReground(result: Record<string, unknown>, text: string): Record<string, unknown> {
   const hso = result.hookSpecificOutput as HookSpecificOutput | undefined;
   if (hso === undefined) {
     return {
       ...result,
-      hookSpecificOutput: emitAllow({
-        source: "deferred_reground_attach",
+      hookSpecificOutput: {
+        hookEventName: "PreToolUse",
         additionalContext: text,
-      }),
+      },
     };
   }
   const existing = hso.additionalContext;

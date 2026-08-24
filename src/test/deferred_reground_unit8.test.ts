@@ -88,7 +88,7 @@ function decision(body: Record<string, unknown>): string | undefined {
     | undefined;
 }
 
-/** The additionalContext of an admit response's allow envelope, or null. */
+/** The additionalContext of an admit response's hook envelope, or null. */
 function regroundTextOf(body: Record<string, unknown>): string | null {
   const hso = body.hookSpecificOutput as Record<string, unknown> | undefined;
   if (hso === undefined) return null;
@@ -233,10 +233,13 @@ test("pending flag + tracked pre-read allow → re-ground block attached once; n
     assert.equal(r.status, 200);
     assert.equal(r.body.status, "fresh");
     const out = r.body.hookSpecificOutput as Record<string, unknown>;
-    assert.equal(out.permissionDecision, "allow");
-    // KTD2 rebuild-at-delivery: byte-identical to the arming render as long
-    // as no state moved in between.
-    assert.equal(out.additionalContext, armedText);
+    // Context-only: the advisory payload adds context, never a decision.
+    assert.deepEqual(out, {
+      hookEventName: "PreToolUse",
+      // KTD2 rebuild-at-delivery: byte-identical to the arming render as
+      // long as no state moved in between.
+      additionalContext: armedText,
+    });
     // Consumed: the very next admit is today's bare fresh bytes.
     const r2 = await post("/hooks/pre-read", {
       session_id: SID_A,
@@ -263,9 +266,9 @@ test("pending flag + untracked pre-read → delivered via envelope; next untrack
     assert.equal(r.status, 200);
     assert.equal(r.body.status, "fresh");
     const out = r.body.hookSpecificOutput as Record<string, unknown>;
-    assert.equal(out.hookEventName, "PreToolUse");
-    assert.equal(out.permissionDecision, "allow");
-    assert.equal(out.additionalContext, armedText);
+    // Context-only envelope: an untracked read that would otherwise prompt
+    // the user must not be auto-approved as a side effect of delivery.
+    assert.deepEqual(out, { hookEventName: "PreToolUse", additionalContext: armedText });
 
     const r2 = await post("/hooks/pre-read", { session_id: SID_A, path: "notes.txt" });
     assert.equal(r2.status, 200);
@@ -420,7 +423,7 @@ test("a second session-start re-marks idempotently: still exactly one delivery",
 
 // ------------------------------------------------------- other admit seams
 
-test("pre-edit attach point: {ok:true} rides a new allow envelope; rebuild renders the CURRENT (EXCLUSIVE) grant", async () => {
+test("pre-edit attach point: {ok:true} rides a new context-only envelope; rebuild renders the CURRENT (EXCLUSIVE) grant", async () => {
   const { post, cleanup } = await makeServer();
   try {
     await armReground(post, SID_A);
@@ -487,6 +490,95 @@ test("pre-grep attach point: delivery from BOTH the tracked work path and the em
   }
 });
 
+// ------------------------------------------------- permission containment
+//
+// The load-bearing pin for the SB-10 review finding: the advisory payload
+// may ADD context, never widen a permission decision. `permissionDecision:
+// "allow"` short-circuits Claude Code's own permission prompting, so a
+// delivery that promoted a bare untracked admit to an allow envelope would
+// auto-approve — once per compaction — a bash/edit that should have
+// prompted. Verified against Claude Code CLI 2.1.233: a PreToolUse envelope
+// carrying additionalContext with NO permissionDecision still has its
+// context rendered to the model, so the allow buys nothing.
+
+test("delivery on a bare admit emits a CONTEXT-ONLY envelope: the wire bytes contain no permissionDecision at all", async () => {
+  const { post, sessions, cleanup } = await makeServer();
+  try {
+    // Every untracked/zero-tracked surface: the bodies that carry no
+    // decision of their own must not acquire one from the delivery.
+    const surfaces: Array<[string, Record<string, unknown>]> = [
+      ["/hooks/pre-read", { session_id: SID_A, path: "notes.txt" }],
+      ["/hooks/pre-edit", { session_id: SID_A, path: "notes.txt" }],
+      ["/hooks/pre-bash", { session_id: SID_A, command: "echo hello" }],
+      ["/hooks/pre-grep", { session_id: SID_A, search_root: "src/empty" }],
+    ];
+    for (const [path, body] of surfaces) {
+      const armedText = await armReground(post, SID_A);
+      const r = await post(path, body);
+      assert.equal(r.status, 200, path);
+      const out = r.body.hookSpecificOutput as Record<string, unknown>;
+      // Exact key set — pins the ABSENCE, not merely a non-"allow" value.
+      assert.deepEqual(
+        out,
+        { hookEventName: "PreToolUse", additionalContext: armedText },
+        `${path}: context-only envelope`,
+      );
+      assert.equal(
+        Object.prototype.hasOwnProperty.call(out, "permissionDecision"),
+        false,
+        `${path}: no permissionDecision key`,
+      );
+      assert.equal(
+        Object.prototype.hasOwnProperty.call(out, "permissionDecisionReason"),
+        false,
+        `${path}: no permissionDecisionReason key`,
+      );
+      // Raw wire bytes, not the re-parsed object: nothing decision-shaped
+      // may appear anywhere in the response.
+      assert.ok(!r.text.includes("permissionDecision"), `${path}: wire bytes carry no decision`);
+      assert.equal(sessions.hasCompactPending(SID_A), false, `${path}: flag consumed`);
+    }
+  } finally {
+    await cleanup();
+  }
+});
+
+test("delivery onto an EXISTING envelope leaves its decision untouched (merge path unchanged)", async () => {
+  const { registry, sessions, post, cleanup } = await makeServer();
+  try {
+    // Warn-mode stale read: the base result already owns an allow envelope
+    // with prose of its own. The merge must append the block and keep that
+    // decision — containment removes MINTED decisions, never existing ones.
+    const pid = registry.resolveOrRegisterArtifact("plan.md", HASH_1);
+    const agentA = sessions.registerSession(SID_A);
+    registry.grantShared(pid, agentA, 10);
+    const agentB = sessions.registerSession(SID_B);
+    registry.acquireExclusive(pid, agentB, 20); // A → INVALID
+    registry.commit(pid, agentB, HASH_2, 30); // v2, last_writer = B
+    registry.popPendingNoticesForAgent(agentA); // pure stale envelope
+
+    const armed = await post("/hooks/session-start", { session_id: SID_A });
+    assert.equal(armed.status, 200);
+    assert.notDeepEqual(armed.body, {});
+
+    const r = await post("/hooks/pre-read", {
+      session_id: SID_A,
+      path: "plan.md",
+      content_hash: HASH_2,
+    });
+    assert.equal(r.status, 200);
+    assert.equal(r.body.status, "stale");
+    const out = r.body.hookSpecificOutput as Record<string, unknown>;
+    assert.equal(out.permissionDecision, "allow");
+    const text = out.additionalContext as string;
+    assert.ok(text.startsWith("⚠ Stale read"), "the base envelope's prose renders first");
+    assert.ok(text.includes(SS_HEADER), "the re-grounding block is appended after it");
+    assert.equal(sessions.hasCompactPending(SID_A), false);
+  } finally {
+    await cleanup();
+  }
+});
+
 // ------------------------------------------------------------- at-most-once
 
 test("R2: parallel qualifying parent admits race one flag — exactly one response carries the block", async () => {
@@ -509,5 +601,110 @@ test("R2: parallel qualifying parent admits race one flag — exactly one respon
     assert.equal(sessions.hasCompactPending(SID_A), false);
   } finally {
     await cleanup();
+  }
+});
+
+test("pre-edit attach point: the UNTRACKED fast path delivers; next call byte-matches the pre-flag baseline", async () => {
+  const { post, cleanup } = await makeServer();
+  try {
+    // Pre-flag baseline: today's exact untracked pre-edit bytes.
+    const baseline = await post("/hooks/pre-edit", { session_id: SID_A, path: "notes.txt" });
+    assert.equal(baseline.status, 200);
+    assert.equal(baseline.text, '{"ok":true}');
+
+    const armedText = await armReground(post, SID_A);
+    const r = await post("/hooks/pre-edit", { session_id: SID_A, path: "notes.txt" });
+    assert.equal(r.status, 200);
+    assert.equal(r.body.ok, true);
+    const out = r.body.hookSpecificOutput as Record<string, unknown>;
+    // Context-only envelope: an untracked EDIT is exactly the call that must
+    // keep prompting — delivery may add context, never authority.
+    assert.deepEqual(out, { hookEventName: "PreToolUse", additionalContext: armedText });
+
+    const r2 = await post("/hooks/pre-edit", { session_id: SID_A, path: "notes.txt" });
+    assert.equal(r2.status, 200);
+    assert.equal(r2.text, baseline.text);
+  } finally {
+    await cleanup();
+  }
+});
+
+// ------------------------------------------------------ rebuild forfeiture
+
+test("a rebuild failure AFTER the claim forfeits the delivery — the admit keeps its bytes (KD3)", async () => {
+  // The claim is won, then `buildSessionStartContext` throws. R2 permits
+  // at-most-once → zero, so the delivery is dropped rather than turning an
+  // otherwise-successful admit into a 500.
+  const tmp = mkdtempSync(join(tmpdir(), "reground8-forfeit-"));
+  mkdirSync(join(tmp, ".coherence"), { recursive: true });
+  const realRegistry = new ArtifactRegistry(join(tmp, ".coherence", "state.db"));
+  let explode = false;
+  const proxied = new Proxy(realRegistry, {
+    get(target, prop, receiver) {
+      // `allStateMaps`'s only consumer is the session-start builder, so the
+      // arming call and the admit's own registry work stay untouched.
+      if (explode && prop === "allStateMaps") {
+        return () => {
+          throw new Error("allStateMaps exploded");
+        };
+      }
+      const value = Reflect.get(target, prop, receiver);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+  const sessions = new SessionRegistry();
+  const server = createServer({
+    secret: SECRET,
+    startedAtMs: Date.now(),
+    version: "test",
+    registry: proxied,
+    policy: PolicyRef.load(tmp),
+    sessions,
+  });
+  await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
+  const port = (server.address() as AddressInfo).port;
+  const post = async (path: string, body: unknown) => {
+    const res = await fetch(`http://127.0.0.1:${port}${path}`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${SECRET}`,
+        Host: "127.0.0.1",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(body),
+    });
+    const text = await res.text();
+    return { status: res.status, text, body: JSON.parse(text) as Record<string, unknown> };
+  };
+  const captured: string[] = [];
+  const original = process.stderr.write;
+  try {
+    await armReground(post, SID_A);
+    assert.equal(sessions.hasCompactPending(SID_A), true);
+
+    explode = true;
+    process.stderr.write = ((chunk: string | Uint8Array): boolean => {
+      captured.push(String(chunk));
+      return true;
+    }) as typeof process.stderr.write;
+    const r = await post("/hooks/pre-read", { session_id: SID_A, path: "notes.txt" });
+    process.stderr.write = original;
+
+    assert.equal(r.status, 200);
+    assert.equal(r.text, '{"status":"fresh"}');
+    assert.ok(!r.text.includes("Post-compaction"));
+    // Claimed and forfeited: the flag is gone, not re-armed for a retry.
+    assert.equal(sessions.hasCompactPending(SID_A), false);
+    assert.ok(captured.join("").includes("delivery forfeited"));
+  } finally {
+    process.stderr.write = original;
+    explode = false;
+    await new Promise<void>((r) => {
+      server.close(() => {
+        realRegistry.close();
+        rmSync(tmp, { recursive: true, force: true });
+        r();
+      });
+    });
   }
 });

@@ -496,3 +496,183 @@ test("session-start: R8 breadcrumb fires only for a never-seen session in a none
     await cleanup();
   }
 });
+
+// ------------------------------------------------------- template escaping
+
+test("session-start: a tracked path carrying a template token renders VERBATIM (single-pass fmt)", async () => {
+  const { registry, sessions, post, cleanup } = await makeServer();
+  try {
+    // `isValidPath` admits braces and `$`, so a real workspace can register
+    // any of these names. Substitution must be ONE pass over the template —
+    // exactly like Python's `str.format` — or an already-inserted path gets
+    // re-scanned and the model is handed a path that does not exist.
+    const dollar = registry.resolveOrRegisterArtifact("docs/$&/dollar.md", HASH_1);
+    const braced = registry.resolveOrRegisterArtifact("docs/{current}/plan.md", HASH_1);
+    const held = registry.resolveOrRegisterArtifact("docs/{version}/held.md", HASH_1);
+    const agentA = sessions.registerSession(SID_A);
+    registry.grantShared(dollar, agentA, 10);
+    registry.grantShared(braced, agentA, 10); // A observed v1
+    registry.grantShared(held, agentA, 10);
+    const agentB = sessions.registerSession(SID_B);
+    registry.acquireExclusive(braced, agentB, 20); // A → INVALID at v1
+    registry.commit(braced, agentB, HASH_2, 30); // v2, last_writer = B
+    registry.popPendingNoticesForAgent(agentA);
+
+    const r = await post("/hooks/session-start", { session_id: SID_A });
+    assert.equal(r.status, 200);
+    assert.equal(
+      sessionStartText(r.body),
+      [
+        SS_HEADER,
+        "At compaction you held SHARED on docs/$&/dollar.md (v1) — re-acquire before writing.",
+        "docs/{current}/plan.md advanced to v2 past your last-observed v1 — re-read before relying on it.",
+        "At compaction you held SHARED on docs/{version}/held.md (v1) — re-acquire before writing.",
+        SS_CLOSING,
+      ].join("\n"),
+    );
+  } finally {
+    await cleanup();
+  }
+});
+
+// ------------------------------------------------------ notice-block cap
+
+test("session-start: the flattened notice block honours the verbatim cap (R5 size bound)", async () => {
+  const { registry, sessions, post, cleanup } = await makeServer();
+  try {
+    // 40 preempted grants — the notice list is flattened across the parent
+    // and every registered subagent, so without a cap the payload grows
+    // without bound and the 10KB additionalContext ceiling is a coin flip.
+    const agentA = sessions.registerSession(SID_A);
+    const agentB = sessions.registerSession(SID_B);
+    for (let i = 0; i < 40; i++) {
+      const id = registry.resolveOrRegisterArtifact(`docs/plans/p${i}.md`, HASH_1);
+      registry.grantShared(id, agentA, 10);
+      registry.acquireExclusive(id, agentB, 20); // queues A a notice; A → INVALID
+    }
+
+    const r = await post("/hooks/session-start", { session_id: SID_A });
+    assert.equal(r.status, 200);
+    const text = sessionStartText(r.body);
+    // Exactly three notice bullets survive verbatim...
+    assert.equal(text.split("\n").filter((l) => l.startsWith("  • ")).length, 3);
+    // ...and BOTH blocks (notices, artifact lines) coalesce the remaining 37.
+    const overflow = "Plus 37 more — run agent-coherence-status for the full picture.";
+    assert.equal(text.split("\n").filter((l) => l === overflow).length, 2);
+    assert.ok(Buffer.byteLength(text, "utf8") < 10_000);
+    // Peek, never pop (R6): the cap bounds the PROSE, not the queue.
+    assert.equal(registry.peekPendingNoticesForAgent(agentA).length, 40);
+  } finally {
+    await cleanup();
+  }
+});
+
+// ------------------------------------------------------- subagent identity
+
+test("session-start: agent_id registers the subagent but the payload stays SESSION-scoped", async () => {
+  const { registry, sessions, post, cleanup } = await makeServer();
+  try {
+    const id = registry.resolveOrRegisterArtifact("CLAUDE.md", HASH_1);
+    registry.grantShared(id, sessions.registerSession(SID_A), 10);
+
+    // Baseline: no agent_id on the wire.
+    const baseline = await post("/hooks/session-start", { session_id: SID_A });
+    assert.equal(baseline.status, 200);
+
+    // Same call presenting a subagent identity: registered per SB-25, but
+    // the payload is built for the session (parent + every subagent), so a
+    // subagent holding nothing contributes nothing and the bytes match.
+    const withAgent = await post("/hooks/session-start", {
+      session_id: SID_A,
+      agent_id: "worker-1",
+    });
+    assert.equal(withAgent.status, 200);
+    assert.equal(sessionStartText(withAgent.body), sessionStartText(baseline.body));
+    assert.ok(
+      sessions.agentsForSession(SID_A).some((a) => a.subagentName === "worker-1"),
+      "a valid agent_id must be registered under the session",
+    );
+
+    // A malformed id is ignored (never a 400, never registered) — the read
+    // paths' readSubagentId contract.
+    const malformed = await post("/hooks/session-start", {
+      session_id: SID_A,
+      agent_id: "bad!chars",
+    });
+    assert.equal(malformed.status, 200);
+    assert.ok(!sessions.agentsForSession(SID_A).some((a) => a.subagentName === "bad!chars"));
+  } finally {
+    await cleanup();
+  }
+});
+
+// ------------------------------------------------------- degraded build
+
+test("session-start: a failed build answers {} , leaves the flag unarmed, and breadcrumbs (KTD7)", async () => {
+  const tmp = mkdtempSync(join(tmpdir(), "session-start-degraded-"));
+  const realRegistry = new ArtifactRegistry(join(tmp, ".coherence", "state.db"));
+  // Only the builder's batched read explodes; every other registry call
+  // behaves, so the failure is the handler's guard and nothing else.
+  const exploding = new Proxy(realRegistry, {
+    get(target, prop, receiver) {
+      if (prop === "allStateMaps") {
+        return () => {
+          throw new Error("allStateMaps exploded");
+        };
+      }
+      const value = Reflect.get(target, prop, receiver);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+  const sessions = new SessionRegistry();
+  const server = createServer({
+    secret: SECRET,
+    startedAtMs: Date.now(),
+    version: "test",
+    registry: exploding,
+    policy: PolicyRef.load(tmp),
+    sessions,
+  });
+  await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
+  const port = (server.address() as AddressInfo).port;
+  const captured: string[] = [];
+  const original = process.stderr.write;
+  process.stderr.write = ((chunk: string | Uint8Array): boolean => {
+    captured.push(String(chunk));
+    return true;
+  }) as typeof process.stderr.write;
+  try {
+    realRegistry.grantShared(
+      realRegistry.resolveOrRegisterArtifact("CLAUDE.md", HASH_1),
+      sessions.registerSession(SID_B),
+      10,
+    );
+    const res = await fetch(`http://127.0.0.1:${port}/hooks/session-start`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${SECRET}`,
+        Host: "127.0.0.1",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ session_id: SID_A }),
+    });
+    assert.equal(res.status, 200);
+    assert.deepEqual(await res.json(), {});
+    // Never armed: nothing was built, so there is nothing to deliver later.
+    assert.equal(sessions.consumeCompactPending(SID_A), false);
+    const stderr = captured.join("");
+    assert.ok(stderr.includes("session-start build failed"));
+    // The degraded exit returns BEFORE the R8 breadcrumb — a build that
+    // could not read the workspace must not claim what it holds.
+    assert.ok(!stderr.includes("never-seen session"));
+  } finally {
+    process.stderr.write = original;
+    await new Promise<void>((r) => {
+      server.close(() => {
+        realRegistry.close();
+        rmSync(tmp, { recursive: true, force: true });
+        r();
+      });
+    });
+  }
+});

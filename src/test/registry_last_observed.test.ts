@@ -277,3 +277,45 @@ test("commitCas conflict (no mutation) records nothing for the loser", () => {
     cleanup();
   }
 });
+
+// ------------------------------------------------------------------
+// Upgrade into M∪E from an existing row (the clearReclaim UPDATE arm)
+// ------------------------------------------------------------------
+
+test("SHARED → EXCLUSIVE upgrade re-records the current version on the existing row", () => {
+  const { registry, cleanup } = makeRegistry();
+  try {
+    const id = registry.resolveOrRegisterArtifact("plan.md", HASH_1);
+    registry.grantShared(id, AGENT_A, 10); // A observed v1
+    registry.commitCas(id, AGENT_B, 1, HASH_2, 20); // peer WIN → v2, A INVALID
+    registry.grantShared(id, AGENT_A, 30); // A re-reads the fresh bytes → v2
+
+    // S→E: new ∈ M/E, old ∉ M/E — the clearReclaim UPDATE arm, on a row
+    // that already exists (not the INSERT arm the fresh-pair tests cover).
+    registry.acquireExclusive(id, AGENT_A, 40);
+    assert.equal(registry.getAgentState(id, AGENT_A), MESIState.EXCLUSIVE);
+    assert.equal(registry.lastObservedVersionFor(id, AGENT_A), 2);
+  } finally {
+    cleanup();
+  }
+});
+
+test("INVALID → EXCLUSIVE upgrade advances a stale recorded value to the current version", () => {
+  const { registry, cleanup } = makeRegistry();
+  try {
+    const id = registry.resolveOrRegisterArtifact("plan.md", HASH_1);
+    registry.grantShared(id, AGENT_A, 10); // A observed v1
+    registry.acquireExclusive(id, AGENT_B, 20); // A → INVALID, still recorded at v1
+    registry.commit(id, AGENT_B, HASH_2, 30); // v2
+    assert.equal(registry.lastObservedVersionFor(id, AGENT_A), 1);
+
+    // A takes the write grant straight out of INVALID: same clearReclaim
+    // arm, and the stale comparand must move to the version A now holds —
+    // otherwise the post-compaction walk would flag A against its own read.
+    registry.acquireExclusive(id, AGENT_A, 40);
+    assert.equal(registry.getAgentState(id, AGENT_A), MESIState.EXCLUSIVE);
+    assert.equal(registry.lastObservedVersionFor(id, AGENT_A), 2);
+  } finally {
+    cleanup();
+  }
+});
