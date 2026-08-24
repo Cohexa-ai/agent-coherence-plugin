@@ -18,7 +18,6 @@
  * since Node is single-threaded by design (no GIL concept; event loop
  * serializes JS access), the Python locking concern doesn't apply.
  */
-import { performance } from "node:perf_hooks";
 import { sessionToAgentId, sessionToAgentName } from "./agent_id.js";
 
 export class SessionRegistry {
@@ -34,12 +33,13 @@ export class SessionRegistry {
 
   // SB-10 U6 (KTD5): compact-pending flags, keyed by session_id. Set by
   // /hooks/session-start when the re-grounding payload is non-empty;
-  // consumed by the deferred-delivery path (a later unit). Value is the
-  // monotonic mark time so the expiry wiring can age flags out. Mirrors
-  // Python `CoordinatorHTTPServer._compact_pending` — process-local, so a
+  // consumed by reground.ts's claim at the allow-attach seam (SB-10 U8).
+  // Expiry is Stop-event-driven only (`expireCompactPending`; a coordinator
+  // restart clears implicitly) — never age-based. Mirrors Python
+  // `CoordinatorHTTPServer._compact_pending` — process-local, so a
   // coordinator restart drops undelivered flags (accepted degradation:
   // re-grounding is advisory, never load-bearing).
-  private readonly compactPending = new Map<string, number>();
+  private readonly compactPending = new Set<string>();
 
   /**
    * Register a session by its Claude Code session_id, optionally scoped to a
@@ -103,7 +103,7 @@ export class SessionRegistry {
    * subagents re-enter on their next hook call.
    */
   agentsForSession(sessionId: string): Array<{ agentId: string; subagentName: string | null }> {
-    const subagentPrefix = `claude-session-${sessionId}:subagent-`;
+    const subagentPrefix = `${sessionToAgentName(sessionId)}:subagent-`;
     const subagents: Array<{ agentId: string; subagentName: string }> = [];
     for (const [agentId, name] of this.nameByAgentId) {
       if (name.startsWith(subagentPrefix)) {
@@ -120,18 +120,18 @@ export class SessionRegistry {
 
   /**
    * SB-10 U6 (KTD5): arm the compact-pending flag for a session. Idempotent:
-   * a second compaction before delivery simply re-stamps the mark time.
+   * a second compaction before delivery simply re-marks.
    */
   markCompactPending(sessionId: string): void {
-    this.compactPending.set(sessionId, performance.now());
+    this.compactPending.add(sessionId);
   }
 
   /**
    * SB-10 U6 (KTD5): ATOMIC test-and-clear of the compact-pending flag —
    * true iff the flag was set (and this call cleared it). Node's
-   * single-threaded event loop makes Map.delete's presence-return the
+   * single-threaded event loop makes Set.delete's presence-return the
    * exact test-and-clear primitive; the shape is kept so racing consumers
-   * (the deferred-delivery unit) get exactly one winner.
+   * (reground.ts's claim at the allow seam) get exactly one winner.
    */
   consumeCompactPending(sessionId: string): boolean {
     return this.compactPending.delete(sessionId);

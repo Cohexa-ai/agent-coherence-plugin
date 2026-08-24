@@ -42,7 +42,7 @@ import {
   isValidContentHashOrAbsent,
   readSubagentId,
 } from "./_common.js";
-import { deliverPendingReground } from "./reground.js";
+import { deliverPendingReground, writeFastAdmit } from "./reground.js";
 
 export type PreReadDeps = HookDeps;
 
@@ -81,19 +81,10 @@ export async function handlePreRead(
   const withReground = (result: object): Record<string, unknown> =>
     deliverPendingReground(deps, sessionId, body as Record<string, unknown>, result);
 
-  // Tracked-policy gate: untracked paths fast-path to {fresh} without
-  // touching SQLite (R8 false-positive budget protection). SB-10 U8
-  // (KTD6): the advisory compact-pending peek — a process-local map
-  // lookup, never a registry touch — is hoisted above this exit so a
-  // pending re-grounding payload still reaches an untracked admit; with
-  // no flag pending, response bytes and the no-registry behavior are
-  // exactly today's.
+  // Tracked-policy gate (R8 budget): untracked paths fast-path to {fresh}
+  // via writeFastAdmit's SB-10 U8 compact-pending peek.
   if (!deps.policy.isTracked(path)) {
-    let fast: Record<string, unknown> = { status: "fresh" };
-    if (deps.sessions.hasCompactPending(sessionId)) {
-      fast = withReground(fast);
-    }
-    writeJson(res, 200, fast);
+    writeFastAdmit(res, deps, sessionId, body as Record<string, unknown>, { status: "fresh" });
     return;
   }
 

@@ -34,7 +34,7 @@ import {
   isValidPath,
   readSubagentId,
 } from "./_common.js";
-import { deliverPendingReground } from "./reground.js";
+import { deliverPendingReground, writeFastAdmit } from "./reground.js";
 
 export type PreEditDeps = HookDeps;
 
@@ -64,14 +64,9 @@ export async function handlePreEdit(
   const withReground = (result: object): Record<string, unknown> =>
     deliverPendingReground(deps, sessionId, body as Record<string, unknown>, result);
 
-  // SB-10 U8 (KTD6): advisory peek hoisted above the untracked exit —
-  // see the pre-read twin for the no-flag byte/behavior guarantee.
+  // SB-10 U8 (KTD6): the untracked exit goes through writeFastAdmit's compact-pending peek.
   if (!deps.policy.isTracked(path)) {
-    let fast: Record<string, unknown> = { ok: true };
-    if (deps.sessions.hasCompactPending(sessionId)) {
-      fast = withReground(fast);
-    }
-    writeJson(res, 200, fast);
+    writeFastAdmit(res, deps, sessionId, body as Record<string, unknown>, { ok: true });
     return;
   }
 

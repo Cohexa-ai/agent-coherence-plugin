@@ -21,7 +21,7 @@ import {
   nowTick as nowTickFn,
   readSubagentId,
 } from "./_common.js";
-import { deliverPendingReground } from "./reground.js";
+import { deliverPendingReground, writeFastAdmit } from "./reground.js";
 
 interface PreGrepBody {
   session_id?: unknown;
@@ -54,15 +54,10 @@ export async function handlePreGrep(
   const withReground = (result: object): Record<string, unknown> =>
     deliverPendingReground(deps, sessionId, body as Record<string, unknown>, result);
 
-  // SB-10 U8 (KTD6): advisory peek hoisted above the zero-tracked-
-  // artifacts exit so a pending payload still reaches this admit.
+  // SB-10 U8 (KTD6): the zero-tracked exit goes through writeFastAdmit's compact-pending peek.
   const trackedPaths = deps.registry.artifactNamesUnderPrefix(searchRoot);
   if (trackedPaths.length === 0) {
-    let fast: Record<string, unknown> = { status: "fresh" };
-    if (deps.sessions.hasCompactPending(sessionId)) {
-      fast = withReground(fast);
-    }
-    writeJson(res, 200, fast);
+    writeFastAdmit(res, deps, sessionId, body as Record<string, unknown>, { status: "fresh" });
     return;
   }
 

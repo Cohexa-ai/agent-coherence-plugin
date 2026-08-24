@@ -31,7 +31,7 @@ import {
   nowTick as nowTickFn,
   readSubagentId,
 } from "./_common.js";
-import { deliverPendingReground } from "./reground.js";
+import { deliverPendingReground, writeFastAdmit } from "./reground.js";
 
 const MAX_COMMAND_LENGTH = 16384;
 
@@ -81,16 +81,10 @@ export async function handlePreBash(
   const withReground = (result: object): Record<string, unknown> =>
     deliverPendingReground(deps, sessionId, body as Record<string, unknown>, result);
 
-  // Policy gate — never touches SQLite for an untracked command. SB-10 U8
-  // (KTD6): advisory peek hoisted above the zero-tracked-reads exit — see
-  // the pre-read twin for the no-flag byte/behavior guarantee.
+  // Policy gate — untracked commands exit via writeFastAdmit's SB-10 U8 compact-pending peek.
   const trackedPaths = detectTrackedPaths(command, (p) => deps.policy.isTracked(p));
   if (trackedPaths.length === 0) {
-    let fast: Record<string, unknown> = { status: "fresh" };
-    if (deps.sessions.hasCompactPending(sessionId)) {
-      fast = withReground(fast);
-    }
-    writeJson(res, 200, fast);
+    writeFastAdmit(res, deps, sessionId, body as Record<string, unknown>, { status: "fresh" });
     return;
   }
 

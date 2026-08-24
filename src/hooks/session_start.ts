@@ -5,7 +5,8 @@
  * (agent-coherence 2bd756c, coordinator_server.py). Returns the re-grounding
  * `additionalContext` payload for a compacted session and arms the
  * process-local compact-pending flag for deferred delivery on the next
- * qualifying admit (consumption is wired in a later unit). The
+ * qualifying admit (consumption is implemented by reground.ts's
+ * deliverPendingReground, wired into the four admit hooks (SB-10 U8)). The
  * `source == "compact"` gate lives client-side (the hook-client ladder):
  * this endpoint trusts its caller and treats every request as a compact
  * event (R1).
@@ -126,10 +127,9 @@ export function buildSessionStartContext(
   const sortedArtifacts = [...artifacts].sort((a, b) =>
     a.name < b.name ? -1 : a.name > b.name ? 1 : 0,
   );
-  const stateByArtifact = new Map<string, Map<string, MESIState>>();
-  for (const art of sortedArtifacts) {
-    stateByArtifact.set(art.id, deps.registry.getStateMap(art.id));
-  }
+  // One unfiltered SELECT covers every (artifact, agent) pair; the `?.get`
+  // consumers below tolerate an artifact with no outer entry.
+  const stateByArtifact = deps.registry.allStateMaps();
 
   const notices: Array<{ artifactId: string; preempterAgentId: string; preemptedAtUnixTs: number }> =
     [];

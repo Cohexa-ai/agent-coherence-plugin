@@ -19,8 +19,9 @@
  * prose is rebuilt from registry truth via `buildSessionStartContext` at the
  * moment of attach — never a snapshot cached at compact time.
  */
+import type { ServerResponse } from "node:http";
 import { emitAllow, type HookSpecificOutput } from "../hook_payloads.js";
-import { type HookDeps, hasSubagentIdField } from "./_common.js";
+import { type HookDeps, hasSubagentIdField, writeJson } from "./_common.js";
 import { buildSessionStartContext } from "./session_start.js";
 
 /**
@@ -118,4 +119,25 @@ export function deliverPendingReground(
   const text = claimRegroundContext(deps, sessionId, body);
   if (text === null) return admit;
   return attachReground(admit, text);
+}
+
+/**
+ * SB-10 U8 (KTD6): shared exit for the four hoisted fast paths (untracked /
+ * zero-tracked admits). The advisory compact-pending peek — a process-local
+ * lookup, never a registry touch — keeps no-flag traffic registry-free with
+ * the exact pre-SB-10 response bytes; a pending flag routes through the
+ * deferred re-ground attach, which claims it atomically at the allow seam.
+ * Mirrors Python `_fast_path_json`.
+ */
+export function writeFastAdmit(
+  res: ServerResponse,
+  deps: HookDeps,
+  sessionId: string,
+  body: Record<string, unknown>,
+  base: Record<string, unknown>,
+): void {
+  const result = deps.sessions.hasCompactPending(sessionId)
+    ? deliverPendingReground(deps, sessionId, body, base)
+    : base;
+  writeJson(res, 200, result);
 }
