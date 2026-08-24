@@ -22,6 +22,12 @@
  *   pre-bash     PreToolUse:Bash        → {session_id, command}
  *   pre-grep     PreToolUse:Grep       → {session_id, search_root}
  *
+ * SB-10 U7 (no Python counterpart yet — the gate contract is shared):
+ *   session-start SessionStart          → {session_id}, ONLY when the CC
+ *                payload carries source == "compact" — any other source
+ *                (startup/resume/clear) or an absent source skips fail-open
+ *                with NO network call.
+ *
  * SB-25 companion: when the CC payload carries a subagent `agent_id`, it is
  * threaded into the request body (additive). Both coordinators derive a
  * composite `(session_id, agent_id)` identity from it so subagents are
@@ -52,6 +58,7 @@ export const SUBCOMMANDS = [
   "subagent-stop",
   "pre-bash",
   "pre-grep",
+  "session-start",
 ] as const;
 export type Subcommand = (typeof SUBCOMMANDS)[number];
 
@@ -63,6 +70,7 @@ const ENDPOINT_BY_SUBCOMMAND: Record<Subcommand, string> = {
   "subagent-stop": "/hooks/session-stop",
   "pre-bash": "/hooks/pre-bash",
   "pre-grep": "/hooks/pre-grep",
+  "session-start": "/hooks/session-start",
 };
 
 // ----------------------------------------------------------------------
@@ -172,6 +180,20 @@ export function buildSubagentStop(cc: CcPayload): Record<string, unknown> {
   return { session_id: sessionId, agent_id: aid };
 }
 
+/**
+ * SB-10 U7: SessionStart → post-compaction re-grounding. The `source` gate
+ * lives HERE, client-side (the endpoint trusts its caller and treats every
+ * request as a compact event — U6 R1): only `source === "compact"` may
+ * reach the coordinator. Any other source (startup/resume/clear) or an
+ * absent source is not a compaction — SkipHook rides the fail-open ladder
+ * to `{}` with NO network call. SessionStart stdin carries no agent_id;
+ * withAgentId stays additive-only, so nothing is fabricated.
+ */
+export function buildSessionStart(cc: CcPayload): Record<string, unknown> {
+  if (cc.source !== "compact") throw new SkipHook('source is not "compact"');
+  return withAgentId(cc, { session_id: requireSessionId(cc) });
+}
+
 export function buildPreBash(cc: CcPayload): Record<string, unknown> {
   const sessionId = requireSessionId(cc);
   const command = toolInput(cc).command;
@@ -213,6 +235,8 @@ export function buildPayload(sub: Subcommand, cc: CcPayload, root: string): Reco
       return buildPreBash(cc);
     case "pre-grep":
       return buildPreGrep(cc, root);
+    case "session-start":
+      return buildSessionStart(cc);
   }
 }
 

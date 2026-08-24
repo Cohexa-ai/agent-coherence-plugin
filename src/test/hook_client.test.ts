@@ -5,13 +5,13 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, mkdirSync, readFileSync } from "node:fs";
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { AddressInfo } from "node:net";
+import { createServer as createNetServer, type AddressInfo } from "node:net";
 import { ArtifactRegistry } from "../registry.js";
 import { PolicyRef } from "../policy.js";
 import { SessionRegistry } from "../sessions.js";
@@ -21,6 +21,7 @@ import {
   buildPreEdit,
   buildPostEdit,
   buildSessionStop,
+  buildSessionStart,
   buildPreBash,
   buildPreGrep,
   SkipHook,
@@ -260,4 +261,201 @@ test("buildSubagentStop: agent_id REQUIRED + shape-validated (malformed must nev
   for (const bad of ["bad.id", "has space", "x".repeat(65), "trailing\n", "a/b", ":subagent-x"]) {
     assert.throws(() => buildSubagentStop({ session_id: SID, agent_id: bad }), SkipHook, `expected SkipHook for ${JSON.stringify(bad)}`);
   }
+});
+
+// --------------------------------------- SB-10 U7: session-start (compact)
+
+test("buildSessionStart: gated on source == 'compact'; body is {session_id} (no fabricated agent_id)", () => {
+  assert.deepEqual(buildSessionStart({ session_id: SID, source: "compact" }), {
+    session_id: SID,
+  });
+  for (const source of ["startup", "resume", "clear", undefined]) {
+    const cc: Record<string, unknown> = { session_id: SID };
+    if (source !== undefined) cc.source = source;
+    assert.throws(() => buildSessionStart(cc), SkipHook, `expected SkipHook for source=${String(source)}`);
+  }
+  // Missing session_id (even on compact) → SkipHook.
+  assert.throws(() => buildSessionStart({ source: "compact" }), SkipHook);
+});
+
+/** Async spawn (the deadlock note on the pre-bash e2e test applies here too). */
+function runClientAsync(
+  args: string[],
+  stdin: string,
+  cwd: string,
+): Promise<{ stdout: string; status: number | null }> {
+  return new Promise((resolveRun) => {
+    const child = spawn(process.execPath, [HOOK_CLIENT_JS, ...args], {
+      cwd,
+      stdio: ["pipe", "pipe", "ignore"],
+    });
+    let stdout = "";
+    child.stdout.on("data", (c: Buffer) => (stdout += c.toString("utf8")));
+    child.on("close", (status) => resolveRun({ stdout, status }));
+    child.stdin.write(stdin);
+    child.stdin.end();
+  });
+}
+
+test("session-start e2e: source=compact posts /hooks/session-start; response passes through byte-for-byte", async () => {
+  const root = mkdtempSync(join(tmpdir(), "hookclient-ss-"));
+  const secret = "s".repeat(32);
+  const registry = new ArtifactRegistry(join(root, ".coherence", "state.db"));
+  const policy = PolicyRef.load(root);
+  const sessions = new SessionRegistry();
+  const server = createServer({
+    secret,
+    startedAtMs: Date.now(),
+    version: "test",
+    registry,
+    policy,
+    sessions,
+  });
+  let requests = 0;
+  server.on("request", () => {
+    requests += 1;
+  });
+  try {
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
+    const port = (server.address() as AddressInfo).port;
+    mkdirSync(join(root, ".coherence"), { recursive: true });
+    writeFileSync(join(root, ".coherence", "server.pid"), `${process.pid}\n${port}\nbackend=node\n`);
+    writeFileSync(join(root, ".coherence", "hook.secret"), `${secret}\n`);
+
+    // Seed a held grant so the re-grounding payload is NON-empty.
+    const id = registry.resolveOrRegisterArtifact("plan.md", "1".repeat(64));
+    const agent = sessions.registerSession(SID);
+    registry.acquireExclusive(id, agent, 10);
+
+    const cc = JSON.stringify({ session_id: SID, source: "compact" });
+    const r = await runClientAsync(["session-start", "--root", root], cc, root);
+    assert.equal(r.status, 0);
+    assert.equal(requests, 1);
+    const body = JSON.parse(r.stdout) as Record<string, unknown>;
+    const hso = body.hookSpecificOutput as Record<string, unknown>;
+    assert.equal(hso.hookEventName, "SessionStart");
+    assert.match(
+      hso.additionalContext as string,
+      /^Post-compaction re-grounding \(agent-coherence\):\n/,
+    );
+    // Byte-for-byte passthrough: the client's stdout IS the wire body (the
+    // session-start prose carries no timestamps, so a direct POST with the
+    // same session must serialize identically).
+    const direct = await fetch(`http://127.0.0.1:${port}/hooks/session-start`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${secret}`,
+        Host: "127.0.0.1",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ session_id: SID }),
+    });
+    assert.equal(r.stdout.trim(), (await direct.text()).trim());
+  } finally {
+    // Close in finally: a failing assert must not leave the server handle
+    // holding the test process open (observed as a suite hang during TDD red).
+    await new Promise<void>((r2) => server.close(() => r2()));
+    registry.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("session-start gate: startup/resume/clear/absent source → '{}' exit 0 with NO network call", async () => {
+  const root = mkdtempSync(join(tmpdir(), "hookclient-ss-gate-"));
+  const secret = "s".repeat(32);
+  const registry = new ArtifactRegistry(join(root, ".coherence", "state.db"));
+  const policy = PolicyRef.load(root);
+  const sessions = new SessionRegistry();
+  const server = createServer({
+    secret,
+    startedAtMs: Date.now(),
+    version: "test",
+    registry,
+    policy,
+    sessions,
+  });
+  let requests = 0;
+  server.on("request", () => {
+    requests += 1;
+  });
+  try {
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
+    const port = (server.address() as AddressInfo).port;
+    mkdirSync(join(root, ".coherence"), { recursive: true });
+    writeFileSync(join(root, ".coherence", "server.pid"), `${process.pid}\n${port}\nbackend=node\n`);
+    writeFileSync(join(root, ".coherence", "hook.secret"), `${secret}\n`);
+
+    for (const source of ["startup", "resume", "clear", undefined]) {
+      const payload: Record<string, unknown> = { session_id: SID };
+      if (source !== undefined) payload.source = source;
+      const r = await runClientAsync(["session-start", "--root", root], JSON.stringify(payload), root);
+      assert.equal(r.status, 0, `exit 0 for source=${String(source)}`);
+      assert.equal(r.stdout.trim(), "{}", `'{}' for source=${String(source)}`);
+    }
+    assert.equal(requests, 0);
+  } finally {
+    await new Promise<void>((r2) => server.close(() => r2()));
+    registry.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("session-start fail-open: closed port / empty stdin / malformed JSON → '{}' exit 0", async () => {
+  const { root, cleanup } = makeWorkspace();
+  try {
+    // A pid file pointing at a port nothing listens on (bind, then close).
+    const closedPort = await new Promise<number>((resolvePort) => {
+      const s = createNetServer();
+      s.listen(0, "127.0.0.1", () => {
+        const p = (s.address() as AddressInfo).port;
+        s.close(() => resolvePort(p));
+      });
+    });
+    mkdirSync(join(root, ".coherence"), { recursive: true });
+    writeFileSync(join(root, ".coherence", "server.pid"), `${process.pid}\n${closedPort}\n`);
+    writeFileSync(join(root, ".coherence", "hook.secret"), `${"x".repeat(32)}\n`);
+
+    const down = runClient(
+      ["session-start", "--root", root],
+      JSON.stringify({ session_id: SID, source: "compact" }),
+      root,
+    );
+    assert.equal(down.status, 0);
+    assert.equal(down.stdout.trim(), "{}");
+
+    const emptyStdin = runClient(["session-start", "--root", root], "", root);
+    assert.equal(emptyStdin.status, 0);
+    assert.equal(emptyStdin.stdout.trim(), "{}");
+
+    const badJson = runClient(["session-start", "--root", root], "not json {", root);
+    assert.equal(badJson.status, 0);
+    assert.equal(badJson.stdout.trim(), "{}");
+  } finally {
+    cleanup();
+  }
+});
+
+test("hooks.json: exactly two SessionStart entries — bootstrap shim first, hook-client session-start second", () => {
+  const hooksJsonPath = join(
+    dirname(fileURLToPath(import.meta.url)),
+    "..",
+    "..",
+    "hooks",
+    "hooks.json",
+  );
+  const parsed = JSON.parse(readFileSync(hooksJsonPath, "utf8")) as {
+    hooks: {
+      SessionStart?: Array<{ matcher?: string; hooks: Array<{ type: string; command: string }> }>;
+    };
+  };
+  const entries = parsed.hooks.SessionStart ?? [];
+  assert.equal(entries.length, 2);
+  // Bootstrap shim stays first (it never reads stdin, so the pair is
+  // parallel-safe); the compact re-grounding client is second.
+  assert.ok(entries[0]!.hooks[0]!.command.endsWith("/bin/ensure-coordinator-dispatch"));
+  const second = entries[1]!;
+  assert.equal(second.matcher, undefined);
+  assert.equal(second.hooks.length, 1);
+  assert.equal(second.hooks[0]!.type, "command");
+  assert.ok(second.hooks[0]!.command.endsWith('hook-client" session-start'));
 });
