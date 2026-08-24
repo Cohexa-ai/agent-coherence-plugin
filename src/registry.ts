@@ -884,6 +884,37 @@ export class ArtifactRegistry {
       .run(victimAgentId, artifactId, preempterAgentId, nowUnixTs);
   }
 
+  /**
+   * SB-10 U6: read-only variant of `popPendingNoticesForAgent` — SELECT
+   * without the DELETE. The session-start re-grounding payload renders
+   * pending notices but must NOT consume them (R6): consumption ownership
+   * stays with the admit-endpoint drains, so the victim's next pre-read /
+   * pre-edit still surfaces the same notice. Mirrors Python
+   * `peek_preemption_notice` (per-pair there; per-agent here to match the
+   * pop variant's shape).
+   */
+  peekPendingNoticesForAgent(agentId: string): Array<{
+    artifactId: string;
+    preempterAgentId: string;
+    preemptedAtUnixTs: number;
+  }> {
+    const rows = this.db
+      .prepare(
+        `SELECT artifact_id, preempter_agent_id, preempted_at_unix_ts
+           FROM pending_notices WHERE agent_id = ?`,
+      )
+      .all(agentId) as {
+      artifact_id: string;
+      preempter_agent_id: string;
+      preempted_at_unix_ts: number;
+    }[];
+    return rows.map((r) => ({
+      artifactId: r.artifact_id,
+      preempterAgentId: r.preempter_agent_id,
+      preemptedAtUnixTs: r.preempted_at_unix_ts,
+    }));
+  }
+
   /** Return + drain pending notices for one agent. Used by pre-read/pre-edit hooks. */
   popPendingNoticesForAgent(agentId: string): Array<{
     artifactId: string;
