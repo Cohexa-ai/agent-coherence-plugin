@@ -109,8 +109,14 @@ interface SessionStartContext {
  *   verbatim, the rest coalesce into the overflow line (R5) — a group
  *   fully swallowed by the cap renders no subagent prefix;
  * - the self-qualifying closing line is always last. No timestamps.
+ *
+ * Exported for SB-10 U8: the deferred-delivery seam rebuilds the prose from
+ * registry truth at the moment of attach (KTD2) via this exact builder.
  */
-function buildSessionStartContext(deps: SessionStartDeps, sessionId: string): SessionStartContext {
+export function buildSessionStartContext(
+  deps: SessionStartDeps,
+  sessionId: string,
+): SessionStartContext {
   const agents = deps.sessions.agentsForSession(sessionId);
 
   const artifacts = deps.registry.listArtifacts();

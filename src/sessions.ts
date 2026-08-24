@@ -137,6 +137,18 @@ export class SessionRegistry {
     return this.compactPending.delete(sessionId);
   }
 
+  /**
+   * SB-10 U8 (KTD6): NON-consuming advisory peek at the flag — the cheap
+   * process-local Map lookup the admit handlers hoist above their untracked
+   * fast-path exits, so no-flag traffic keeps today's exact response bytes
+   * and never touches the artifact registry. Advisory only: the
+   * authoritative at-most-once decision stays with the test-and-clear in
+   * `consumeCompactPending` at the allow-attach seam.
+   */
+  hasCompactPending(sessionId: string): boolean {
+    return this.compactPending.has(sessionId);
+  }
+
   /** SB-10 U6 (KTD5): drop an unconsumed flag (parent-Stop expiry wiring). */
   expireCompactPending(sessionId: string): void {
     this.compactPending.delete(sessionId);

@@ -31,6 +31,7 @@ import {
   nowTick as nowTickFn,
   readSubagentId,
 } from "./_common.js";
+import { deliverPendingReground } from "./reground.js";
 
 const MAX_COMMAND_LENGTH = 16384;
 
@@ -73,11 +74,23 @@ export async function handlePreBash(
     writeError(res, 413, "command too long");
     return;
   }
+  const sessionId: string = body.session_id;
 
-  // Policy gate — never touches SQLite for an untracked command.
+  // SB-10 U8 (KTD6): the allow-attach seam — runs after the strict-deny
+  // decision; deny bodies pass through untouched.
+  const withReground = (result: object): Record<string, unknown> =>
+    deliverPendingReground(deps, sessionId, body as Record<string, unknown>, result);
+
+  // Policy gate — never touches SQLite for an untracked command. SB-10 U8
+  // (KTD6): advisory peek hoisted above the zero-tracked-reads exit — see
+  // the pre-read twin for the no-flag byte/behavior guarantee.
   const trackedPaths = detectTrackedPaths(command, (p) => deps.policy.isTracked(p));
   if (trackedPaths.length === 0) {
-    writeJson(res, 200, { status: "fresh" });
+    let fast: Record<string, unknown> = { status: "fresh" };
+    if (deps.sessions.hasCompactPending(sessionId)) {
+      fast = withReground(fast);
+    }
+    writeJson(res, 200, fast);
     return;
   }
 
@@ -138,7 +151,7 @@ export async function handlePreBash(
   const noticeText = drainNoticeText(deps, agentId);
 
   if (staleSummaries.length === 0 && noticeText === null) {
-    writeJson(res, 200, { status: "fresh" });
+    writeJson(res, 200, withReground({ status: "fresh" }));
     return;
   }
 
@@ -172,7 +185,8 @@ export async function handlePreBash(
   } else {
     resp.status = "fresh";
   }
-  writeJson(res, 200, resp);
+  // Notices/stale prose are already merged, so the re-ground block lands last.
+  writeJson(res, 200, withReground(resp));
 }
 
 /** Parse + dispatch helper for use from server.ts. */

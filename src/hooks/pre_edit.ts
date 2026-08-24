@@ -34,6 +34,7 @@ import {
   isValidPath,
   readSubagentId,
 } from "./_common.js";
+import { deliverPendingReground } from "./reground.js";
 
 export type PreEditDeps = HookDeps;
 
@@ -58,8 +59,19 @@ export async function handlePreEdit(
   const sessionId: string = body.session_id;
   const path: string = body.path;
 
+  // SB-10 U8 (KTD6): the allow-attach seam — runs after every deny
+  // decision; strict-deny and refusal bodies pass through untouched.
+  const withReground = (result: object): Record<string, unknown> =>
+    deliverPendingReground(deps, sessionId, body as Record<string, unknown>, result);
+
+  // SB-10 U8 (KTD6): advisory peek hoisted above the untracked exit —
+  // see the pre-read twin for the no-flag byte/behavior guarantee.
   if (!deps.policy.isTracked(path)) {
-    writeJson(res, 200, { ok: true });
+    let fast: Record<string, unknown> = { ok: true };
+    if (deps.sessions.hasCompactPending(sessionId)) {
+      fast = withReground(fast);
+    }
+    writeJson(res, 200, fast);
     return;
   }
 
@@ -162,25 +174,29 @@ export async function handlePreEdit(
       collisionResp.hookSpecificOutput.additionalContext =
         noticeText + "\n\n" + collisionResp.hookSpecificOutput.additionalContext;
     }
-    writeJson(res, 200, collisionResp);
+    writeJson(res, 200, withReground(collisionResp));
     return;
   }
 
   // No collision, but the calling session may have had pending notices from
   // prior preemptions on OTHER artifacts. Surface them.
   if (noticeText !== null) {
-    writeJson(res, 200, {
-      ok: true,
-      hookSpecificOutput: {
-        hookEventName: "PreToolUse",
-        permissionDecision: "allow",
-        additionalContext: noticeText,
-      },
-    });
+    writeJson(
+      res,
+      200,
+      withReground({
+        ok: true,
+        hookSpecificOutput: {
+          hookEventName: "PreToolUse",
+          permissionDecision: "allow",
+          additionalContext: noticeText,
+        },
+      }),
+    );
     return;
   }
 
-  writeJson(res, 200, { ok: true });
+  writeJson(res, 200, withReground({ ok: true }));
 }
 
 export async function preEditRoute(
