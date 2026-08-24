@@ -267,6 +267,21 @@ export class ArtifactRegistry {
   }
 
   /**
+   * Return the artifact version whose bytes this agent last observed (SB-10
+   * R6/R7: recorded atomically with every non-INVALID grant/commit upsert),
+   * or null when the pair was never observed — absence is NULL, never a
+   * 0-sentinel, and a transition to INVALID preserved the prior recorded
+   * value. The post-compaction staleness comparand. Mirrors Python
+   * `last_observed_version_for` (sqlite_registry.py).
+   */
+  lastObservedVersionFor(artifactId: string, agentId: string): number | null {
+    const row = this.db
+      .prepare(`SELECT last_observed_version FROM agent_states WHERE artifact_id = ? AND agent_id = ?`)
+      .get(artifactId, agentId) as { last_observed_version: number | null } | undefined;
+    return row === undefined ? null : row.last_observed_version;
+  }
+
+  /**
    * Acquire EXCLUSIVE for `agentId` on `artifactId`, invalidating any peers
    * currently in M / E / S. Mirrors Python `CoordinatorService.write`
    * (service.py:164) collapsed into a single registry-level transaction
@@ -421,6 +436,19 @@ export class ArtifactRegistry {
       }
       // If already MODIFIED, no transition needed — caller is committing again on a held grant.
 
+      // SB-10 R6/R7: the committer produced (and therefore observed) the new
+      // version's bytes — advance its last_observed_version to nextVersion in
+      // this same txn. The E→M upsert above already recorded it (the artifacts
+      // row was bumped first), but a repeat commit on a held MODIFIED grant
+      // skips that upsert, so advance explicitly. Invalidated peers above keep
+      // their prior value.
+      this.db
+        .prepare(
+          `UPDATE agent_states SET last_observed_version = ?
+           WHERE artifact_id = ? AND agent_id = ?`,
+        )
+        .run(nextVersion, artifactId, agentId);
+
       // Single-writer invariant on post-state. Must hold post-mutation.
       const postMap = this.getStateMap(artifactId);
       checkSingleWriter(postMap);
@@ -564,6 +592,19 @@ export class ArtifactRegistry {
         }
         this.setAgentStateInternal(artifactId, agentId, committerState, MESIState.SHARED, nowTick, "commit_cas");
       }
+
+      // SB-10 R6/R7 (KTD4 first layer): the WIN advances the WRITER's
+      // last_observed_version to nextVersion atomically in this txn — it
+      // produced (and therefore observed) the new version's bytes. The
+      // S/I→SHARED upsert above already recorded it (artifacts was bumped
+      // first), but an already-SHARED committer skips that upsert, so advance
+      // explicitly. Peers going INVALID above keep their prior value.
+      this.db
+        .prepare(
+          `UPDATE agent_states SET last_observed_version = ?
+           WHERE artifact_id = ? AND agent_id = ?`,
+        )
+        .run(nextVersion, artifactId, agentId);
 
       const postMap = this.getStateMap(artifactId);
       checkSingleWriter(postMap);
@@ -793,6 +834,29 @@ export class ArtifactRegistry {
            WHERE artifact_id = ? AND agent_id = ?`,
         )
         .run(newState, grantedAtTick, artifactId, agentId);
+    }
+
+    // SB-10 R6/R7: record the version whose bytes this agent now holds,
+    // atomic with the upsert above (the caller holds the BEGIN IMMEDIATE).
+    // Non-INVALID targets only — a transition TO INVALID preserves the prior
+    // recorded value (the last version actually observed, the post-compaction
+    // staleness comparand) and a never-observed row keeps NULL (never a
+    // 0-sentinel). Mirrors Python sqlite_registry.set_agent_state.
+    if (newState !== MESIState.INVALID) {
+      const versionRow = this.db
+        .prepare(`SELECT version FROM artifacts WHERE id = ?`)
+        .get(artifactId) as { version: number } | undefined;
+      if (versionRow === undefined) {
+        // Callers verify artifact existence before granting; mirror Python's
+        // KeyError so a silent NULL overwrite can never mask the bug.
+        throw new Error(`setAgentStateInternal: artifact ${artifactId} not registered`);
+      }
+      this.db
+        .prepare(
+          `UPDATE agent_states SET last_observed_version = ?
+           WHERE artifact_id = ? AND agent_id = ?`,
+        )
+        .run(versionRow.version, artifactId, agentId);
     }
   }
 

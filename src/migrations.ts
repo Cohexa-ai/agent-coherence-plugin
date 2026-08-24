@@ -22,6 +22,7 @@ import type { Database } from "better-sqlite3";
 import { V1_INITIAL } from "./migrations/v1_initial.js";
 import { V2_VALIDATE_PENDING_NOTICES } from "./migrations/v2_validate_pending_notices.js";
 import { V3_WATCHDOG_DEADLINE } from "./migrations/v3_watchdog_deadline.js";
+import { V4_LAST_OBSERVED } from "./migrations/v4_last_observed.js";
 
 /**
  * Cross-runtime lineage stamp (registry_meta). The sibling Python coordinator
@@ -104,13 +105,20 @@ export interface Migration {
  *  - v2: validate pending_notices shape; formalize v1→v2 boundary per KTD-D
  *  - v3: add agent_states.deadline_tick column per KTD-F watchdog A6 fix
  *
- * Future migrations (v4+) append here; the version-derived SCHEMA_USER_VERSION
+ * v0.4.x SB-10 (this commit):
+ *  - v4: add agent_states.last_observed_version column (nullable; the
+ *    post-compaction staleness comparand — mirrors Python's v6 step). The
+ *    column NAME is shared with the Python ledger, so it is NOT a lineage
+ *    marker; rejectForeignLedgerDb needs no new probe (KTD9).
+ *
+ * Future migrations (v5+) append here; the version-derived SCHEMA_USER_VERSION
  * constant updates automatically.
  */
 export const MIGRATIONS: ReadonlyArray<Migration> = [
   V1_INITIAL,
   V2_VALIDATE_PENDING_NOTICES,
   V3_WATCHDOG_DEADLINE,
+  V4_LAST_OBSERVED,
 ];
 
 /**
