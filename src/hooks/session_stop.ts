@@ -54,6 +54,17 @@ export async function handleSessionStop(
     return;
   }
 
+  // SB-10 U8 (R2): the deferred re-grounding flag lives at most one parent
+  // turn. A PARENT Stop — the wire carries NO agent_id field; SubagentStop
+  // always carries one (SB-25) — ends that turn, so an undelivered flag
+  // expires here instead of leaking into a later turn. A SubagentStop (or a
+  // malformed subagent id, which also presents the field and returned above)
+  // leaves the flag untouched: the parent turn is still in flight and its
+  // next admit may yet deliver.
+  if (!hasSubagentIdField(body as Record<string, unknown>)) {
+    deps.sessions.expireCompactPending(sessionId);
+  }
+
   const agentId = deps.sessions.registerSession(sessionId, subagentId);
   const nowTick = Math.floor(Date.now() / 1000);
 

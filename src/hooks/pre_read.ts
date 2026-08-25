@@ -42,6 +42,7 @@ import {
   isValidContentHashOrAbsent,
   readSubagentId,
 } from "./_common.js";
+import { deliverPendingReground, writeFastAdmit } from "./reground.js";
 
 export type PreReadDeps = HookDeps;
 
@@ -74,10 +75,16 @@ export async function handlePreRead(
   const path: string = body.path;
   const contentHash: string | null = (body.content_hash as string | null | undefined) ?? null;
 
-  // Tracked-policy gate: untracked paths fast-path to {fresh} without
-  // touching SQLite (R8 false-positive budget protection).
+  // SB-10 U8 (KTD6): the allow-attach seam — runs after every deny
+  // decision; a non-qualifying result (strict deny) passes through as the
+  // SAME object, byte-identical, and keeps the flag pending.
+  const withReground = (result: object): Record<string, unknown> =>
+    deliverPendingReground(deps, sessionId, body as Record<string, unknown>, result);
+
+  // Tracked-policy gate (R8 budget): untracked paths fast-path to {fresh}
+  // via writeFastAdmit's SB-10 U8 compact-pending peek.
   if (!deps.policy.isTracked(path)) {
-    writeJson(res, 200, { status: "fresh" });
+    writeFastAdmit(res, deps, sessionId, body as Record<string, unknown>, { status: "fresh" });
     return;
   }
 
@@ -99,10 +106,10 @@ export async function handlePreRead(
     // from prior interactions on OTHER artifacts.
     const notice = buildAdditionalNoticeText(deps, agentId);
     if (notice !== null) {
-      writeJson(res, 200, buildFreshWithNotice(notice));
+      writeJson(res, 200, withReground(buildFreshWithNotice(notice)));
       return;
     }
-    writeJson(res, 200, { status: "fresh" });
+    writeJson(res, 200, withReground({ status: "fresh" }));
     return;
   }
 
@@ -165,10 +172,10 @@ export async function handlePreRead(
     // current version. Fresh.
     const notice = buildAdditionalNoticeText(deps, agentId);
     if (notice !== null) {
-      writeJson(res, 200, buildFreshWithNotice(notice));
+      writeJson(res, 200, withReground(buildFreshWithNotice(notice)));
       return;
     }
-    writeJson(res, 200, { status: "fresh" });
+    writeJson(res, 200, withReground({ status: "fresh" }));
     return;
   }
 
@@ -232,7 +239,8 @@ export async function handlePreRead(
     resp.hookSpecificOutput.additionalContext =
       notice + "\n\n" + resp.hookSpecificOutput.additionalContext;
   }
-  writeJson(res, 200, resp);
+  // Notices are already merged above, so the re-grounding block lands last.
+  writeJson(res, 200, withReground(resp));
 }
 
 /**

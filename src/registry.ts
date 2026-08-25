@@ -81,6 +81,17 @@ export type CasOutcome =
     }
   | { kind: "corruption"; currentVersion: number };
 
+/**
+ * One (artifact, agent) row as the session-start walk needs it: the MESI
+ * state plus the recorded last-observed version (null when the pair never
+ * observed bytes — absence is NULL, never a 0-sentinel). Batched by
+ * `allStateMaps` so the walk never re-queries per pair.
+ */
+export interface AgentStateSnapshot {
+  readonly state: MESIState;
+  readonly lastObserved: number | null;
+}
+
 // ArtifactRow / rowToArtifact removed (ce-review maintainability finding):
 // the SQLite row shape and the Artifact interface were byte-identical;
 // the mapper was an identity function. We cast directly to `Artifact` at
@@ -258,12 +269,84 @@ export class ArtifactRegistry {
     return map;
   }
 
+  /**
+   * Per-agent state snapshots for `agentIds` across every artifact they
+   * have touched, in one SELECT — the batched form of `getStateMap` for
+   * the session-start builder's all-artifacts walk (N per-artifact SELECTs
+   * collapse to one). Carries `last_observed_version` in the SAME row so
+   * the walk's staleness test never re-prepares `lastObservedVersionFor`
+   * per INVALID pair. An artifact none of these agents touched has no outer
+   * entry; consumers tolerate the missing entry.
+   *
+   * Scoped to the caller's agents on purpose (SB-10 review): this runs on
+   * the session-start hook path — twice per compaction, synchronously, on
+   * a table nothing ever garbage-collects — while the only rows the walk
+   * can render belong to the requesting session's parent and subagents. An
+   * unfiltered read would load the workspace's entire coordination history
+   * to discard all but a handful of rows, and better-sqlite3 being
+   * synchronous, it would block every other session's hooks while doing so.
+   *
+   * The predicate is NOT index-backed: `agent_states` is keyed
+   * `(artifact_id, agent_id)` and nothing indexes `agent_id` alone, so
+   * SQLite still walks the table either way (`EXPLAIN QUERY PLAN` reports
+   * `SCAN` for both forms). What the scope removes is the per-row cost —
+   * one JS object plus a Map insert for every row the caller would then
+   * throw away. Measured on a 500k-row table with a four-agent session:
+   * 990ms unscoped, 94ms scoped. An index on `agent_id` would turn the
+   * remaining constant into a bound, but it needs a migration in BOTH
+   * backends (a Node-only `user_version` bump trips the cross-runtime
+   * schema guard), so it is deliberately not done here.
+   */
+  allStateMaps(agentIds: readonly string[]): Map<string, Map<string, AgentStateSnapshot>> {
+    const byArtifact = new Map<string, Map<string, AgentStateSnapshot>>();
+    if (agentIds.length === 0) return byArtifact;
+    const placeholders = agentIds.map(() => "?").join(", ");
+    const rows = this.db
+      .prepare(
+        `SELECT artifact_id, agent_id, state, last_observed_version FROM agent_states ` +
+          `WHERE agent_id IN (${placeholders})`,
+      )
+      .all(...agentIds) as {
+      artifact_id: string;
+      agent_id: string;
+      state: string;
+      last_observed_version: number | null;
+    }[];
+    for (const r of rows) {
+      let inner = byArtifact.get(r.artifact_id);
+      if (inner === undefined) {
+        inner = new Map<string, AgentStateSnapshot>();
+        byArtifact.set(r.artifact_id, inner);
+      }
+      inner.set(r.agent_id, {
+        state: toMESIState(r.state),
+        lastObserved: r.last_observed_version,
+      });
+    }
+    return byArtifact;
+  }
+
   /** Return one agent's MESI state for an artifact, or null if no row exists. */
   getAgentState(artifactId: string, agentId: string): MESIState | null {
     const row = this.db
       .prepare(`SELECT state FROM agent_states WHERE artifact_id = ? AND agent_id = ?`)
       .get(artifactId, agentId) as { state: string } | undefined;
     return row === undefined ? null : toMESIState(row.state);
+  }
+
+  /**
+   * Return the artifact version whose bytes this agent last observed (SB-10
+   * R6/R7: recorded atomically with every non-INVALID grant/commit upsert),
+   * or null when the pair was never observed — absence is NULL, never a
+   * 0-sentinel, and a transition to INVALID preserved the prior recorded
+   * value. The post-compaction staleness comparand. Mirrors Python
+   * `last_observed_version_for` (sqlite_registry.py).
+   */
+  lastObservedVersionFor(artifactId: string, agentId: string): number | null {
+    const row = this.db
+      .prepare(`SELECT last_observed_version FROM agent_states WHERE artifact_id = ? AND agent_id = ?`)
+      .get(artifactId, agentId) as { last_observed_version: number | null } | undefined;
+    return row === undefined ? null : row.last_observed_version;
   }
 
   /**
@@ -415,11 +498,25 @@ export class ArtifactRegistry {
         invalidatedPeers.push(peerId);
       }
 
-      // Transition agent E → M (or M → M no-op).
+      // Transition agent E → M (or M → M no-op). SB-10 R6/R7: the committer
+      // produced (and therefore observed) the new version's bytes — the
+      // upsert records nextVersion as its last_observed_version in this same
+      // txn; invalidated peers above keep their prior value.
       if (agentState === MESIState.EXCLUSIVE) {
-        this.setAgentStateInternal(artifactId, agentId, agentState, MESIState.MODIFIED, nowTick, "commit");
+        this.setAgentStateInternal(
+          artifactId,
+          agentId,
+          agentState,
+          MESIState.MODIFIED,
+          nowTick,
+          "commit",
+          nextVersion,
+        );
+      } else {
+        // Already MODIFIED — a repeat commit on a held grant skips the
+        // upsert, so advance last_observed_version directly.
+        this.touchLastObservedVersion(artifactId, agentId, nextVersion);
       }
-      // If already MODIFIED, no transition needed — caller is committing again on a held grant.
 
       // Single-writer invariant on post-state. Must hold post-mutation.
       const postMap = this.getStateMap(artifactId);
@@ -554,7 +651,11 @@ export class ArtifactRegistry {
         invalidatedPeers.push(peerId);
       }
 
-      // Committer ends SHARED (S no-op; I/absent → SHARED).
+      // Committer ends SHARED (S no-op; I/absent → SHARED). SB-10 R6/R7
+      // (KTD4 first layer): the WIN advances the WRITER's
+      // last_observed_version to nextVersion atomically in this txn — it
+      // produced (and therefore observed) the new version's bytes; peers
+      // going INVALID above keep their prior value.
       const committerState = callerState ?? MESIState.INVALID;
       if (committerState !== MESIState.SHARED) {
         if (!isValidTransition(committerState, MESIState.SHARED)) {
@@ -562,7 +663,19 @@ export class ArtifactRegistry {
             `commitCas: ${agentId} transition ${committerState}→SHARED not allowed`,
           );
         }
-        this.setAgentStateInternal(artifactId, agentId, committerState, MESIState.SHARED, nowTick, "commit_cas");
+        this.setAgentStateInternal(
+          artifactId,
+          agentId,
+          committerState,
+          MESIState.SHARED,
+          nowTick,
+          "commit_cas",
+          nextVersion,
+        );
+      } else {
+        // Already-SHARED committer skips the upsert, so advance
+        // last_observed_version directly.
+        this.touchLastObservedVersion(artifactId, agentId, nextVersion);
       }
 
       const postMap = this.getStateMap(artifactId);
@@ -735,6 +848,14 @@ export class ArtifactRegistry {
    * - new ∈ M/E AND old ∈ M/E → preserve granted_at_tick (continuous M∪E hold)
    * - old ∈ M/E AND new ∉ M/E → drop granted_at_tick (release)
    * - else → preserve
+   *
+   * SB-10 R6/R7 rides the same statements: a non-INVALID target records the
+   * version whose bytes this agent now holds — `observedVersion` when the
+   * caller has it in hand (commit paths), else the artifact row's current
+   * version SELECTed in this txn — the post-compaction staleness comparand.
+   * A transition TO INVALID preserves the prior recorded value (CASE guard
+   * on the UPDATEs; NULL on the INSERT) and a never-observed row keeps NULL
+   * (never a 0-sentinel). Mirrors Python sqlite_registry.set_agent_state.
    */
   private setAgentStateInternal(
     artifactId: string,
@@ -743,9 +864,28 @@ export class ArtifactRegistry {
     newState: MESIState,
     nowTick: number,
     _trigger: string,
+    observedVersion?: number,
   ): void {
     const newInMe = isWriter(newState);
     const prevInMe = isWriter(priorState);
+
+    const observe = newState !== MESIState.INVALID;
+    let observedValue: number | null = null;
+    if (observe) {
+      if (observedVersion !== undefined) {
+        observedValue = observedVersion;
+      } else {
+        const versionRow = this.db
+          .prepare(`SELECT version FROM artifacts WHERE id = ?`)
+          .get(artifactId) as { version: number } | undefined;
+        if (versionRow === undefined) {
+          // Callers verify artifact existence before granting; mirror Python's
+          // KeyError so a silent NULL overwrite can never mask the bug.
+          throw new Error(`setAgentStateInternal: artifact ${artifactId} not registered`);
+        }
+        observedValue = versionRow.version;
+      }
+    }
 
     // Look up prior granted_at_tick for the preserve case.
     const priorRow = this.db
@@ -773,27 +913,47 @@ export class ArtifactRegistry {
       this.db
         .prepare(
           `INSERT INTO agent_states (artifact_id, agent_id, state, granted_at_tick,
-                                     last_reclaim_trigger, last_reclaim_tick)
-           VALUES (?, ?, ?, ?, NULL, NULL)`,
+                                     last_reclaim_trigger, last_reclaim_tick,
+                                     last_observed_version)
+           VALUES (?, ?, ?, ?, NULL, NULL, ?)`,
         )
-        .run(artifactId, agentId, newState, grantedAtTick);
+        .run(artifactId, agentId, newState, grantedAtTick, observedValue);
     } else if (clearReclaim) {
       this.db
         .prepare(
           `UPDATE agent_states
              SET state = ?, granted_at_tick = ?,
-                 last_reclaim_trigger = NULL, last_reclaim_tick = NULL
+                 last_reclaim_trigger = NULL, last_reclaim_tick = NULL,
+                 last_observed_version = CASE WHEN ? THEN ? ELSE last_observed_version END
            WHERE artifact_id = ? AND agent_id = ?`,
         )
-        .run(newState, grantedAtTick, artifactId, agentId);
+        .run(newState, grantedAtTick, observe ? 1 : 0, observedValue, artifactId, agentId);
     } else {
       this.db
         .prepare(
-          `UPDATE agent_states SET state = ?, granted_at_tick = ?
+          `UPDATE agent_states
+             SET state = ?, granted_at_tick = ?,
+                 last_observed_version = CASE WHEN ? THEN ? ELSE last_observed_version END
            WHERE artifact_id = ? AND agent_id = ?`,
         )
-        .run(newState, grantedAtTick, artifactId, agentId);
+        .run(newState, grantedAtTick, observe ? 1 : 0, observedValue, artifactId, agentId);
     }
+  }
+
+  /**
+   * SB-10 R6/R7: advance the recorded last-observed version for one
+   * (artifact, agent) pair. Used by the repeat-commit branches where the
+   * committer already holds its end state (M→M commit, already-SHARED
+   * commit_cas) and `setAgentStateInternal`'s upsert is skipped. Caller
+   * MUST hold an open transaction.
+   */
+  private touchLastObservedVersion(artifactId: string, agentId: string, version: number): void {
+    this.db
+      .prepare(
+        `UPDATE agent_states SET last_observed_version = ?
+         WHERE artifact_id = ? AND agent_id = ?`,
+      )
+      .run(version, artifactId, agentId);
   }
 
   /**
@@ -820,6 +980,46 @@ export class ArtifactRegistry {
       .run(victimAgentId, artifactId, preempterAgentId, nowUnixTs);
   }
 
+  /** Shared SELECT + row mapping for the peek/pop pending-notice variants. */
+  private selectPendingNoticesForAgent(agentId: string): Array<{
+    artifactId: string;
+    preempterAgentId: string;
+    preemptedAtUnixTs: number;
+  }> {
+    const rows = this.db
+      .prepare(
+        `SELECT artifact_id, preempter_agent_id, preempted_at_unix_ts
+           FROM pending_notices WHERE agent_id = ?`,
+      )
+      .all(agentId) as {
+      artifact_id: string;
+      preempter_agent_id: string;
+      preempted_at_unix_ts: number;
+    }[];
+    return rows.map((r) => ({
+      artifactId: r.artifact_id,
+      preempterAgentId: r.preempter_agent_id,
+      preemptedAtUnixTs: r.preempted_at_unix_ts,
+    }));
+  }
+
+  /**
+   * SB-10 U6: read-only variant of `popPendingNoticesForAgent` — SELECT
+   * without the DELETE. The session-start re-grounding payload renders
+   * pending notices but must NOT consume them (R6): consumption ownership
+   * stays with the admit-endpoint drains, so the victim's next pre-read /
+   * pre-edit still surfaces the same notice. Mirrors Python
+   * `peek_preemption_notice` (per-pair there; per-agent here to match the
+   * pop variant's shape).
+   */
+  peekPendingNoticesForAgent(agentId: string): Array<{
+    artifactId: string;
+    preempterAgentId: string;
+    preemptedAtUnixTs: number;
+  }> {
+    return this.selectPendingNoticesForAgent(agentId);
+  }
+
   /** Return + drain pending notices for one agent. Used by pre-read/pre-edit hooks. */
   popPendingNoticesForAgent(agentId: string): Array<{
     artifactId: string;
@@ -828,27 +1028,14 @@ export class ArtifactRegistry {
   }> {
     this.db.exec("BEGIN IMMEDIATE");
     try {
-      const rows = this.db
-        .prepare(
-          `SELECT artifact_id, preempter_agent_id, preempted_at_unix_ts
-             FROM pending_notices WHERE agent_id = ?`,
-        )
-        .all(agentId) as {
-        artifact_id: string;
-        preempter_agent_id: string;
-        preempted_at_unix_ts: number;
-      }[];
-      if (rows.length === 0) {
+      const notices = this.selectPendingNoticesForAgent(agentId);
+      if (notices.length === 0) {
         this.db.exec("COMMIT");
         return [];
       }
       this.db.prepare(`DELETE FROM pending_notices WHERE agent_id = ?`).run(agentId);
       this.db.exec("COMMIT");
-      return rows.map((r) => ({
-        artifactId: r.artifact_id,
-        preempterAgentId: r.preempter_agent_id,
-        preemptedAtUnixTs: r.preempted_at_unix_ts,
-      }));
+      return notices;
     } catch (err) {
       try {
         this.db.exec("ROLLBACK");

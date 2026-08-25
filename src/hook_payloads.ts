@@ -29,6 +29,14 @@ export interface StaleSummary {
 
 export interface HookSpecificOutput {
   hookEventName: "PreToolUse";
+  /**
+   * REQUIRED, deliberately: this interface is the DECIDING envelope, and
+   * `writeJson` is a bare `JSON.stringify` with no runtime schema check, so
+   * this field being mandatory is the only thing that stops a deciding
+   * emitter from shipping a body Claude Code would read as "no opinion".
+   * An advisory envelope that carries context WITHOUT deciding anything is
+   * a different shape with its own type — see `PreToolUseContextOutput`.
+   */
   permissionDecision: "allow" | "deny" | "ask";
   /**
    * OPTIONAL (Unit 6 review correction): Python's `emit_strict_deny` returns
@@ -37,6 +45,55 @@ export interface HookSpecificOutput {
    */
   additionalContext?: string;
   permissionDecisionReason?: string;
+}
+
+/**
+ * SB-10: the context-only `hookSpecificOutput` envelope for a PreToolUse
+ * response — advisory prose with NO permission decision. Node port of
+ * Python `PreToolUseContextOutput` (hook_payloads.py).
+ *
+ * Distinct from `HookSpecificOutput` by the ABSENCE of
+ * `permissionDecision`: this envelope delivers text to the model without
+ * touching the tool call's permission outcome, so Claude Code's ordinary
+ * prompting still applies. Used by the SB-10 deferred re-grounding attach,
+ * whose payload is advisory (KD3) and must never widen a permission
+ * decision.
+ */
+export interface PreToolUseContextOutput {
+  hookEventName: "PreToolUse";
+  additionalContext: string;
+}
+
+/**
+ * Either PreToolUse envelope shape, for the seams that INSPECT a response
+ * body they did not build (the deferred re-ground attach). Reading
+ * `permissionDecision` off this union requires an `in` narrowing, which is
+ * the point: a context-only envelope has no decision to read.
+ */
+export type PreToolUseEnvelope = HookSpecificOutput | PreToolUseContextOutput;
+
+/**
+ * Build a context-only `hookSpecificOutput` envelope: `additionalContext`
+ * prose and nothing else. Node port of Python `emit_pretooluse_context`.
+ *
+ * Deliberately NOT routed through `emitAllow` — and deliberately emitting
+ * no `permissionDecision`. An advisory payload must never widen a
+ * permission decision: promoting a bare admit body to
+ * `permissionDecision: "allow"` just to carry prose would short-circuit
+ * Claude Code's own permission prompting for that tool call.
+ *
+ * Empirical basis: a PreToolUse `hookSpecificOutput` with `hookEventName` +
+ * `additionalContext` and no `permissionDecision` IS rendered to the model
+ * — A/B capture against Claude Code CLI 2.1.233 on 2026-08-25 (the
+ * marker-primed model quoted the injected line verbatim in both arms).
+ */
+export function emitPreToolUseContext(args: {
+  additionalContext: string;
+}): PreToolUseContextOutput {
+  return {
+    hookEventName: "PreToolUse",
+    additionalContext: args.additionalContext,
+  };
 }
 
 // ----------------------------------------------------------------------
@@ -233,6 +290,15 @@ export function preemptionNoticeText(
     preempterSessionShort: string;
     preemptedAtUnixTs: number;
   }>,
+  /**
+   * How many notices are actually pending, when the caller renders only a
+   * capped slice of them (SB-10's session-start block does). The intro
+   * counts what the operator HAS, not how many bullets fit — reporting the
+   * slice length would tell them three grants were revoked when forty were.
+   * Defaults to `notices.length`, so the uncapped admit-path callers keep
+   * their exact bytes.
+   */
+  totalCount: number = notices.length,
 ): string {
   if (notices.length === 0) return "";
   const lines = notices.map(
@@ -240,9 +306,9 @@ export function preemptionNoticeText(
       `  • ${n.artifactPath} preempted by session ${n.preempterSessionShort} at ${isoUtc(n.preemptedAtUnixTs)}`,
   );
   const intro =
-    notices.length === 1
+    totalCount === 1
       ? "⚠ Your EXCLUSIVE grant on this artifact was silently revoked by another session:"
-      : `⚠ ${notices.length} of your EXCLUSIVE grants were silently revoked by other sessions:`;
+      : `⚠ ${totalCount} of your EXCLUSIVE grants were silently revoked by other sessions:`;
   return `${intro}\n${lines.join("\n")}`;
 }
 
@@ -282,5 +348,90 @@ export function buildFreshWithNotice(notice: string): FreshWithNoticeResponse {
       permissionDecision: "allow",
       additionalContext: notice,
     },
+  };
+}
+
+// ----------------------------------------------------------------------
+// SB-10 post-compaction re-grounding prose (KTD8) — Node port of Python
+// hook_payloads.py, byte-parity contract
+// ----------------------------------------------------------------------
+//
+// The Python coordinator (agent-coherence 2bd756c) renders these exact
+// strings, and the protocol corpus byte-matches the rendered payload. NO
+// timestamps may appear in any of them (corpus normalization keys stay
+// untouched), and grant prose is EVENT-ANCHORED, not present-tense — a
+// turn-end Stop drain can release E/M before the attachment ever renders,
+// so "you hold" would emit a false claim. Every dash is U+2014 EM DASH
+// with surrounding spaces. Any wording change must land in both backends
+// plus the corpus fixtures in the same change.
+
+/**
+ * SB-10 U2: `hookSpecificOutput` envelope for the SessionStart hook.
+ * Unlike PreToolUse there is no permissionDecision — SessionStart cannot
+ * gate anything (KD3: re-grounding is advisory, never blocking); the
+ * envelope carries only the re-grounding prose.
+ */
+export interface SessionStartHookOutput {
+  hookEventName: "SessionStart";
+  additionalContext: string;
+}
+
+/** First line of every non-empty re-grounding payload. */
+export const SESSION_START_HEADER = "Post-compaction re-grounding (agent-coherence):";
+
+/**
+ * R3 held-grant line. `{state}` is the full MESI state name
+ * (EXCLUSIVE/MODIFIED/SHARED); `{version}` is the CURRENT coordinated
+ * version from the snapshot, not the granted-at version.
+ */
+export const SESSION_START_GRANT_LINE_TEMPLATE =
+  "At compaction you held {state} on {path} (v{version}) — re-acquire " + "before writing.";
+
+/**
+ * R4 stale-divergence line (KD1 shape B): both versions render so the
+ * model can judge how far behind its cached view is.
+ */
+export const SESSION_START_STALE_LINE_TEMPLATE =
+  "{path} advanced to v{current} past your last-observed v{last} — " +
+  "re-read before relying on it.";
+
+/**
+ * R4 touched-but-current line — also the R7 admit rendering for
+ * never-observed rows and own-edit-exempt rows.
+ */
+export const SESSION_START_TOUCHED_LINE_TEMPLATE = "{path} is at v{current}.";
+
+/**
+ * R5 overflow line, mirroring the preemption-prose cap pattern: at most 3
+ * artifact lines render verbatim; the rest coalesce here.
+ */
+export const SESSION_START_OVERFLOW_LINE_TEMPLATE =
+  "Plus {count} more — run agent-coherence-status for the full picture.";
+
+/**
+ * KTD8 grouping: the parent agent's lines render first (no prefix), then
+ * each registered subagent's lines under this prefix, groups sorted by
+ * agent name.
+ */
+export const SESSION_START_SUBAGENT_PREFIX_TEMPLATE = "Subagent {name}:";
+
+/**
+ * Self-qualifier, always the last line when any lines rendered — R2
+ * accepts one residual duplicate delivery, so the prose must read
+ * correctly when seen twice (a later read wins over a stale re-emission).
+ */
+export const SESSION_START_CLOSING_LINE =
+  "Versions are as of this re-grounding; a more recent read supersedes " + "this notice.";
+
+/**
+ * Build the `hookSpecificOutput` envelope for a SessionStart response.
+ * Mirrors Python `emit_session_start` — deliberately NOT routed through
+ * `emitAllow`: there is no permissionDecision on SessionStart, and the
+ * KTD-U meta-test counts allow-path surface, which this is not.
+ */
+export function emitSessionStart(args: { additionalContext: string }): SessionStartHookOutput {
+  return {
+    hookEventName: "SessionStart",
+    additionalContext: args.additionalContext,
   };
 }
