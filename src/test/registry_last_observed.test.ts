@@ -19,6 +19,7 @@ import { runPendingMigrations, SCHEMA_USER_VERSION } from "../migrations.js";
 import { V1_INITIAL } from "../migrations/v1_initial.js";
 import { V2_VALIDATE_PENDING_NOTICES } from "../migrations/v2_validate_pending_notices.js";
 import { V3_WATCHDOG_DEADLINE } from "../migrations/v3_watchdog_deadline.js";
+import { V4_LAST_OBSERVED } from "../migrations/v4_last_observed.js";
 import { ArtifactRegistry } from "../registry.js";
 import { MESIState } from "../states.js";
 
@@ -67,14 +68,14 @@ const HASH_3 = "3".repeat(64);
 // Migration v4 (KTD9)
 // ------------------------------------------------------------------
 
-test("v4: a fresh db lands last_observed_version and user_version=4", () => {
+test("fresh db lands last_observed_version and the derived head version", () => {
   const { path, cleanup } = tmpDbPath();
   const db = new Database(path);
   try {
     const result = runPendingMigrations(db);
-    assert.equal(SCHEMA_USER_VERSION, 4, "MIGRATIONS list must derive head=4");
-    assert.equal(result.current, 4);
-    assert.equal(userVersion(db), 4);
+    assert.equal(SCHEMA_USER_VERSION, 5, "MIGRATIONS list must derive head=5");
+    assert.equal(result.current, SCHEMA_USER_VERSION);
+    assert.equal(userVersion(db), SCHEMA_USER_VERSION);
     assert.ok(
       agentStatesColumns(db).includes("last_observed_version"),
       "agent_states must carry last_observed_version",
@@ -99,8 +100,8 @@ test("v4: a v3 db upgrades; upgraded and fresh agent_states columns identical", 
     assert.ok(!agentStatesColumns(upDb).includes("last_observed_version"));
 
     const result = runPendingMigrations(upDb);
-    assert.equal(result.applied.length, 1, "only v4 should be pending");
-    assert.equal(userVersion(upDb), 4);
+    assert.equal(result.applied.length, 2, "v4 and v5 should be pending");
+    assert.equal(userVersion(upDb), SCHEMA_USER_VERSION);
 
     runPendingMigrations(freshDb);
     assert.deepEqual(
@@ -370,3 +371,82 @@ test("allStateMaps with no agents returns an empty map without querying", () => 
     cleanup();
   }
 });
+
+// ------------------------------------------------------------------
+// Migration v5 (SB-10 perf follow-up): agent_states(agent_id) index
+// ------------------------------------------------------------------
+
+function agentStatesIndexes(db: Database.Database): string[] {
+  const rows = db
+    .prepare(`SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='agent_states' AND name LIKE 'idx_%'`)
+    .all() as Array<{ name: string }>;
+  return rows.map((r) => r.name).sort();
+}
+
+test("v5: a fresh db lands idx_agent_states_agent", () => {
+  const { path, cleanup } = tmpDbPath();
+  const db = new Database(path);
+  try {
+    runPendingMigrations(db);
+    assert.deepEqual(agentStatesIndexes(db), ["idx_agent_states_agent"]);
+  } finally {
+    db.close();
+    cleanup();
+  }
+});
+
+test("v5: a v4-era db (column present, index absent) upgrades and gains the index", () => {
+  const { path, cleanup } = tmpDbPath();
+  const db = new Database(path);
+  try {
+    V1_INITIAL.apply(db);
+    V2_VALIDATE_PENDING_NOTICES.apply(db);
+    V3_WATCHDOG_DEADLINE.apply(db);
+    V4_LAST_OBSERVED.apply(db);
+    assert.equal(userVersion(db), 4);
+    assert.deepEqual(agentStatesIndexes(db), []);
+
+    const result = runPendingMigrations(db);
+    assert.equal(result.applied.length, 1, "only v5 should be pending");
+    assert.equal(userVersion(db), SCHEMA_USER_VERSION);
+    assert.deepEqual(agentStatesIndexes(db), ["idx_agent_states_agent"]);
+  } finally {
+    db.close();
+    cleanup();
+  }
+});
+
+test("the scoped allStateMaps query is index-backed (SEARCH, never SCAN)", () => {
+  // Without the index the scope only trims per-row materialization — the
+  // page walk over a table nothing garbage-collects still runs on the hook
+  // path. Dropping the index later would regress silently (queries stay
+  // correct), so the plan itself is pinned.
+  const { registry, cleanup } = makeRegistry();
+  try {
+    const id = registry.resolveOrRegisterArtifact("plan.md", HASH_1);
+    registry.grantShared(id, AGENT_A, 10);
+    const db = new Database(
+      (registry as unknown as { db: { name: string } }).db.name,
+      { readonly: true },
+    );
+    try {
+      const plan = (
+        db
+          .prepare(
+            `EXPLAIN QUERY PLAN SELECT artifact_id, agent_id, state, last_observed_version ` +
+              `FROM agent_states WHERE agent_id IN (?, ?)`,
+          )
+          .all(AGENT_A, AGENT_B) as Array<{ detail: string }>
+      )
+        .map((r) => r.detail)
+        .join(" | ");
+      assert.ok(plan.includes("idx_agent_states_agent"), plan);
+      assert.ok(!plan.includes("SCAN agent_states"), plan);
+    } finally {
+      db.close();
+    }
+  } finally {
+    cleanup();
+  }
+});
+
