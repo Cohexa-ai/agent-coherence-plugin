@@ -131,11 +131,15 @@ export function buildSessionStartContext(
   const sortedArtifacts = [...artifacts].sort((a, b) =>
     a.name < b.name ? -1 : a.name > b.name ? 1 : 0,
   );
-  // One unfiltered SELECT covers every (artifact, agent) pair — state AND
-  // recorded last-observed version together, so the staleness test below
-  // never re-prepares a per-pair statement inside this synchronous walk.
-  // The `?.get` consumers tolerate an artifact with no outer entry.
-  const stateByArtifact = deps.registry.allStateMaps();
+  // One SELECT covers every (artifact, agent) pair THIS session can render
+  // — state AND recorded last-observed version together, so the staleness
+  // test below never re-prepares a per-pair statement inside this
+  // synchronous walk. Scoped to `agents`: a peer session's rows could never
+  // reach the output (the lookup below skips them), and `agent_states` is
+  // never garbage-collected, so reading them would put the workspace's
+  // whole history on a hook path. The `?.get` consumers tolerate an
+  // artifact with no outer entry.
+  const stateByArtifact = deps.registry.allStateMaps(agents.map((a) => a.agentId));
 
   const notices: Array<{ artifactId: string; preempterAgentId: string; preemptedAtUnixTs: number }> =
     [];
@@ -200,9 +204,16 @@ export function buildSessionStartContext(
     // registered subagent, so it needs the same verbatim cap the artifact
     // lines carry — `preemptionNoticeText` renders one bullet per notice
     // with no cap of its own and its admit-path bytes must not move.
-    // Collection order is preserved (never re-sorted), so any payload at or
-    // under the cap keeps its exact bytes.
-    const verbatimNotices = notices.slice(0, SESSION_START_ARTIFACT_VERBATIM_CAP);
+    //
+    // Newest-first BEFORE the cap, mirroring Python `_build_preemption_text`
+    // (`sorted(key=ts, reverse=True)`): the most recent preemption is the
+    // most informative signal for the agent's next decision, and collection
+    // order here is artifact-PATH order, which would otherwise decide
+    // arbitrarily which notices survive — dropping exactly the ones Python
+    // keeps. The true pre-cap count still goes to the intro; the bullets are
+    // what the cap bounds, never the number the operator is told.
+    const newestFirst = [...notices].sort((a, b) => b.preemptedAtUnixTs - a.preemptedAtUnixTs);
+    const verbatimNotices = newestFirst.slice(0, SESSION_START_ARTIFACT_VERBATIM_CAP);
     noticeText = preemptionNoticeText(
       verbatimNotices.map((n) => {
         const preempterSession = deps.sessions.agentIdToSessionId(n.preempterAgentId) ?? "<unknown>";
@@ -216,6 +227,7 @@ export function buildSessionStartContext(
           preemptedAtUnixTs: n.preemptedAtUnixTs,
         };
       }),
+      notices.length,
     );
     const noticeOverflow = notices.length - verbatimNotices.length;
     if (noticeOverflow > 0) {

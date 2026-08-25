@@ -319,3 +319,54 @@ test("INVALID → EXCLUSIVE upgrade advances a stale recorded value to the curre
     cleanup();
   }
 });
+
+// ------------------------------------------------------------------
+// Batched read scoping (SB-10 review): `allStateMaps` feeds a HOOK path,
+// so it must read the caller's agents — never the whole ledger.
+// ------------------------------------------------------------------
+
+test("allStateMaps reads ONLY the requested agents' rows", () => {
+  const { registry, cleanup } = makeRegistry();
+  try {
+    const id = registry.resolveOrRegisterArtifact("plan.md", HASH_1);
+    registry.grantShared(id, AGENT_A, 10);
+    registry.grantShared(id, AGENT_B, 20);
+
+    const inner = registry.allStateMaps([AGENT_A]).get(id);
+    assert.ok(inner !== undefined, "the requested agent's artifact must carry an entry");
+    assert.deepEqual(
+      [...inner.keys()],
+      [AGENT_A],
+      "a peer session's row must never be read, mapped, or discarded",
+    );
+    assert.equal(inner.get(AGENT_A)?.lastObserved, 1);
+  } finally {
+    cleanup();
+  }
+});
+
+test("allStateMaps omits an artifact only foreign agents ever touched", () => {
+  const { registry, cleanup } = makeRegistry();
+  try {
+    const mine = registry.resolveOrRegisterArtifact("mine.md", HASH_1);
+    const theirs = registry.resolveOrRegisterArtifact("theirs.md", HASH_2);
+    registry.grantShared(mine, AGENT_A, 10);
+    registry.grantShared(theirs, AGENT_B, 20);
+
+    const scoped = registry.allStateMaps([AGENT_A]);
+    assert.deepEqual([...scoped.keys()], [mine]);
+  } finally {
+    cleanup();
+  }
+});
+
+test("allStateMaps with no agents returns an empty map without querying", () => {
+  const { registry, cleanup } = makeRegistry();
+  try {
+    const id = registry.resolveOrRegisterArtifact("plan.md", HASH_1);
+    registry.grantShared(id, AGENT_A, 10);
+    assert.equal(registry.allStateMaps([]).size, 0);
+  } finally {
+    cleanup();
+  }
+});

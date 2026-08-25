@@ -30,14 +30,14 @@ export interface StaleSummary {
 export interface HookSpecificOutput {
   hookEventName: "PreToolUse";
   /**
-   * OPTIONAL (SB-10 review correction): a PreToolUse envelope may carry
-   * `additionalContext` with NO decision at all — Claude Code renders the
-   * context and leaves its own permission flow untouched. The advisory
-   * post-compaction re-grounding payload uses exactly that shape, so this
-   * key must be omissible; see `attachReground` in hooks/reground.ts for
-   * the rule and its empirical basis. Every DECIDING emitter still sets it.
+   * REQUIRED, deliberately: this interface is the DECIDING envelope, and
+   * `writeJson` is a bare `JSON.stringify` with no runtime schema check, so
+   * this field being mandatory is the only thing that stops a deciding
+   * emitter from shipping a body Claude Code would read as "no opinion".
+   * An advisory envelope that carries context WITHOUT deciding anything is
+   * a different shape with its own type — see `PreToolUseContextOutput`.
    */
-  permissionDecision?: "allow" | "deny" | "ask";
+  permissionDecision: "allow" | "deny" | "ask";
   /**
    * OPTIONAL (Unit 6 review correction): Python's `emit_strict_deny` returns
    * NO `additionalContext` key at all, and `emit_allow` includes it only
@@ -45,6 +45,55 @@ export interface HookSpecificOutput {
    */
   additionalContext?: string;
   permissionDecisionReason?: string;
+}
+
+/**
+ * SB-10: the context-only `hookSpecificOutput` envelope for a PreToolUse
+ * response — advisory prose with NO permission decision. Node port of
+ * Python `PreToolUseContextOutput` (hook_payloads.py).
+ *
+ * Distinct from `HookSpecificOutput` by the ABSENCE of
+ * `permissionDecision`: this envelope delivers text to the model without
+ * touching the tool call's permission outcome, so Claude Code's ordinary
+ * prompting still applies. Used by the SB-10 deferred re-grounding attach,
+ * whose payload is advisory (KD3) and must never widen a permission
+ * decision.
+ */
+export interface PreToolUseContextOutput {
+  hookEventName: "PreToolUse";
+  additionalContext: string;
+}
+
+/**
+ * Either PreToolUse envelope shape, for the seams that INSPECT a response
+ * body they did not build (the deferred re-ground attach). Reading
+ * `permissionDecision` off this union requires an `in` narrowing, which is
+ * the point: a context-only envelope has no decision to read.
+ */
+export type PreToolUseEnvelope = HookSpecificOutput | PreToolUseContextOutput;
+
+/**
+ * Build a context-only `hookSpecificOutput` envelope: `additionalContext`
+ * prose and nothing else. Node port of Python `emit_pretooluse_context`.
+ *
+ * Deliberately NOT routed through `emitAllow` — and deliberately emitting
+ * no `permissionDecision`. An advisory payload must never widen a
+ * permission decision: promoting a bare admit body to
+ * `permissionDecision: "allow"` just to carry prose would short-circuit
+ * Claude Code's own permission prompting for that tool call.
+ *
+ * Empirical basis: a PreToolUse `hookSpecificOutput` with `hookEventName` +
+ * `additionalContext` and no `permissionDecision` IS rendered to the model
+ * — A/B capture against Claude Code CLI 2.1.233 on 2026-08-25 (the
+ * marker-primed model quoted the injected line verbatim in both arms).
+ */
+export function emitPreToolUseContext(args: {
+  additionalContext: string;
+}): PreToolUseContextOutput {
+  return {
+    hookEventName: "PreToolUse",
+    additionalContext: args.additionalContext,
+  };
 }
 
 // ----------------------------------------------------------------------
@@ -241,6 +290,15 @@ export function preemptionNoticeText(
     preempterSessionShort: string;
     preemptedAtUnixTs: number;
   }>,
+  /**
+   * How many notices are actually pending, when the caller renders only a
+   * capped slice of them (SB-10's session-start block does). The intro
+   * counts what the operator HAS, not how many bullets fit — reporting the
+   * slice length would tell them three grants were revoked when forty were.
+   * Defaults to `notices.length`, so the uncapped admit-path callers keep
+   * their exact bytes.
+   */
+  totalCount: number = notices.length,
 ): string {
   if (notices.length === 0) return "";
   const lines = notices.map(
@@ -248,9 +306,9 @@ export function preemptionNoticeText(
       `  • ${n.artifactPath} preempted by session ${n.preempterSessionShort} at ${isoUtc(n.preemptedAtUnixTs)}`,
   );
   const intro =
-    notices.length === 1
+    totalCount === 1
       ? "⚠ Your EXCLUSIVE grant on this artifact was silently revoked by another session:"
-      : `⚠ ${notices.length} of your EXCLUSIVE grants were silently revoked by other sessions:`;
+      : `⚠ ${totalCount} of your EXCLUSIVE grants were silently revoked by other sessions:`;
   return `${intro}\n${lines.join("\n")}`;
 }
 

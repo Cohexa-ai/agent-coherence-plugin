@@ -548,7 +548,10 @@ test("session-start: the flattened notice block honours the verbatim cap (R5 siz
     for (let i = 0; i < 40; i++) {
       const id = registry.resolveOrRegisterArtifact(`docs/plans/p${i}.md`, HASH_1);
       registry.grantShared(id, agentA, 10);
-      registry.acquireExclusive(id, agentB, 20); // queues A a notice; A → INVALID
+      // Preemption timestamps ASCEND with i, so the newest three are p37,
+      // p38, p39 — which ASCII path order (p0, p1, p10, p11, …) does NOT
+      // put first. Which three survive the cap is therefore observable.
+      registry.acquireExclusive(id, agentB, 20 + i); // queues A a notice; A → INVALID
     }
 
     const r = await post("/hooks/session-start", { session_id: SID_A });
@@ -560,6 +563,22 @@ test("session-start: the flattened notice block honours the verbatim cap (R5 siz
     const overflow = "Plus 37 more — run agent-coherence-status for the full picture.";
     assert.equal(text.split("\n").filter((l) => l === overflow).length, 2);
     assert.ok(Buffer.byteLength(text, "utf8") < 10_000);
+    // The intro reports the TRUE pending count, never the post-cap bullet
+    // count: "3 of your grants were revoked" when 40 were is a wrong number
+    // in the operator's face, and the overflow line cannot unsay it.
+    assert.ok(
+      text.includes("⚠ 40 of your EXCLUSIVE grants were silently revoked by other sessions:"),
+      `notice intro must carry the pre-cap count; got:\n${text}`,
+    );
+    // Newest-first, mirroring Python's `_build_preemption_text` sort: the
+    // cap must drop the OLDEST preemptions, not whichever sort first by path.
+    assert.deepEqual(
+      text
+        .split("\n")
+        .filter((l) => l.startsWith("  • "))
+        .map((l) => l.slice("  • ".length).split(" ")[0]),
+      ["docs/plans/p39.md", "docs/plans/p38.md", "docs/plans/p37.md"],
+    );
     // Peek, never pop (R6): the cap bounds the PROSE, not the queue.
     assert.equal(registry.peekPendingNoticesForAgent(agentA).length, 40);
   } finally {
@@ -667,6 +686,76 @@ test("session-start: a failed build answers {} , leaves the flag unarmed, and br
     assert.ok(!stderr.includes("never-seen session"));
   } finally {
     process.stderr.write = original;
+    await new Promise<void>((r) => {
+      server.close(() => {
+        realRegistry.close();
+        rmSync(tmp, { recursive: true, force: true });
+        r();
+      });
+    });
+  }
+});
+
+// ------------------------------------------------- read scoping at the seam
+
+test("session-start: the builder scopes the state read to THIS session's agents (SB-10 review)", async () => {
+  // Behavioural tests cannot pin this: surplus rows are unobservable in the
+  // render (the walk looks each pair up per agent), which is exactly why
+  // dropping the scope would ship byte-identical and green. So assert the
+  // ARGUMENT — otherwise the whole point of the fix, that a hook path stops
+  // reading the workspace's entire never-GC'd ledger, is revertible in
+  // silence.
+  const tmp = mkdtempSync(join(tmpdir(), "session-start-scope-"));
+  const realRegistry = new ArtifactRegistry(join(tmp, ".coherence", "state.db"));
+  const scopes: ReadonlyArray<string>[] = [];
+  const recording = new Proxy(realRegistry, {
+    get(target, prop, receiver) {
+      if (prop === "allStateMaps") {
+        return (agentIds: readonly string[]) => {
+          scopes.push([...agentIds]);
+          return realRegistry.allStateMaps(agentIds);
+        };
+      }
+      const value = Reflect.get(target, prop, receiver);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+  const sessions = new SessionRegistry();
+  const server = createServer({
+    secret: SECRET,
+    startedAtMs: Date.now(),
+    version: "test",
+    registry: recording,
+    policy: PolicyRef.load(tmp),
+    sessions,
+  });
+  await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
+  const port = (server.address() as AddressInfo).port;
+  try {
+    const id = realRegistry.resolveOrRegisterArtifact("plan.md", HASH_1);
+    const agentA = sessions.registerSession(SID_A);
+    const foreign = sessions.registerSession(SID_B); // a peer session's rows
+    realRegistry.grantShared(id, agentA, 10);
+    realRegistry.grantShared(id, foreign, 20);
+    const subagent = sessions.registerSession(SID_A, "worker-1");
+
+    const res = await fetch(`http://127.0.0.1:${port}/hooks/session-start`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${SECRET}`,
+        Host: "127.0.0.1",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ session_id: SID_A }),
+    });
+    assert.equal(res.status, 200);
+    await res.json();
+
+    assert.equal(scopes.length, 1, "the builder reads state exactly once");
+    // The parent AND its registered subagent — never the peer session.
+    assert.deepEqual([...scopes[0]].sort(), [agentA, subagent].sort());
+    assert.ok(!scopes[0].includes(foreign), "a peer session's agent must never be in scope");
+  } finally {
     await new Promise<void>((r) => {
       server.close(() => {
         realRegistry.close();

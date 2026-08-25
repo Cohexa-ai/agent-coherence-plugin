@@ -22,7 +22,7 @@
  * moment of attach — never a snapshot cached at compact time.
  */
 import type { ServerResponse } from "node:http";
-import type { HookSpecificOutput } from "../hook_payloads.js";
+import { emitPreToolUseContext, type PreToolUseEnvelope } from "../hook_payloads.js";
 import { type HookDeps, hasSubagentIdField, writeJson } from "./_common.js";
 import { buildSessionStartContext } from "./session_start.js";
 
@@ -38,9 +38,11 @@ import { buildSessionStartContext } from "./session_start.js";
  * envelope nor an admit: no attach, no consume.
  */
 function regroundQualifies(result: Record<string, unknown>): boolean {
-  const hso = result.hookSpecificOutput as HookSpecificOutput | undefined;
+  const hso = result.hookSpecificOutput as PreToolUseEnvelope | undefined;
   if (hso !== undefined) {
-    return hso.permissionDecision === "allow";
+    // `in` first: an envelope with no decision (a context-only advisory
+    // one) is not an allow, so it neither carries nor consumes a delivery.
+    return "permissionDecision" in hso && hso.permissionDecision === "allow";
   }
   return result.ok === true || result.status === "fresh";
 }
@@ -106,18 +108,15 @@ function claimRegroundContext(
  * (protocol corpus): same key set, same insertion order.
  */
 function attachReground(result: Record<string, unknown>, text: string): Record<string, unknown> {
-  const hso = result.hookSpecificOutput as HookSpecificOutput | undefined;
+  const hso = result.hookSpecificOutput as PreToolUseEnvelope | undefined;
   if (hso === undefined) {
     return {
       ...result,
-      hookSpecificOutput: {
-        hookEventName: "PreToolUse",
-        additionalContext: text,
-      },
+      hookSpecificOutput: emitPreToolUseContext({ additionalContext: text }),
     };
   }
   const existing = hso.additionalContext;
-  const merged: HookSpecificOutput = {
+  const merged: PreToolUseEnvelope = {
     ...hso,
     additionalContext: existing === undefined ? text : existing + "\n\n" + text,
   };
