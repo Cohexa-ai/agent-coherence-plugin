@@ -113,7 +113,7 @@ First-time experience: on your first Read of a tracked file in a workspace, you'
 
 The marketplace add resolves to the latest published release. To pin a specific version: `/plugin marketplace add Cohexa-ai/agent-coherence-plugin@v0.3.1`.
 
-**Two backends. As of the SB-2 front-door fix, a fresh install needs neither step below** — a new workspace defaults to the **Node backend**, which self-provisions on first session (no `pip install`, no manual config). The paths below are for the Python backend or for an explicit choice.
+**Two backends. As of v0.4.0, a fresh install needs neither step below** — a new workspace defaults to the **Node backend**, which self-provisions on first session (no `pip install`, no manual config). The paths below are for the Python backend or for an explicit choice.
 
 **A. Python backend (richest feature set; the default for workspaces created before this change).** Install the library that provides the coordinator + hook client:
 
@@ -139,7 +139,10 @@ After install, restart any running `claude` sessions in your workspace so the ne
 > release that ships `agent-coherence-coordinator` and `agent-coherence-hook-client`
 > (the earlier `0.7.x` line was the LangGraph/CrewAI/AutoGen drop-in only). v0.2
 > strict mode requires `agent-coherence>=0.8.2`; warn-mode (the
-> default) works against `>=0.8.0`. Release page:
+> default) works against `>=0.8.0`. Compaction-aware re-grounding on the
+> Python backend requires `agent-coherence>=0.14.0` — on an older library the
+> `SessionStart` hook fails open and the feature is simply absent (every other
+> behavior is unchanged). The bundled Node backend ships it natively. Release page:
 > [Cohexa-ai/agent-coherence](https://github.com/Cohexa-ai/agent-coherence/releases).
 
 ### Other targets (Cursor, Codex, Copilot, etc.)
@@ -199,7 +202,7 @@ The coordinator creates `.coherence/` at your repo root automatically. Inside it
 
 | File | Purpose | Auto-gitignored |
 |---|---|---|
-| `state.db` | SQLite-WAL artifact state. Per-artifact MESI state, versions, SHA-256 content hashes. **Never** raw file content (KTD-13). | ✓ |
+| `state.db` | SQLite-WAL artifact state. Per-artifact MESI state, versions, SHA-256 content hashes. **Never** raw file content. | ✓ |
 | `hook.secret` | Bearer token for hook auth, mode `0600`. 32 random bytes hex-encoded. | ✓ |
 | `server.pid` | Coordinator process discovery (`<pid>\n<port>\nbackend=...\n`). | ✓ |
 | `tracked.yaml` | Your opt-in patterns (gitignore-style globs). Commit if you want the tracked set to apply across team checkouts. | Operator's choice |
@@ -279,7 +282,7 @@ pytest -m protocol_corpus
 |---|---|---|
 | Agents still hit stale-spec collisions silently | `pip install agent-coherence` step missed, or `agent-coherence-hook-client` not on PATH | Confirm `which agent-coherence-coordinator agent-coherence-hook-client` both resolve. If `pip install` succeeded but binaries aren't found, check that your shell's PATH includes the install prefix's `bin/` (e.g. `~/.local/bin` for user installs). |
 | Plugin load failure / silent no-op | Coordinator backend not installed | Run `claude --include-hook-events --output-format stream-json "echo test"` and look for `plugin_errors` in the init event. If `hook-load-failed` appears, the plugin's hooks.json references commands not on PATH. |
-| Stale-warning shown when worktrees just have different branches checked out | Filesystem-state semantics: divergent content on first observation surfaces as `hash_differs` (KTD-9) | Expected behavior. Add the path to `ignored.yaml` if the divergence is intentional. |
+| Stale-warning shown when worktrees just have different branches checked out | Filesystem-state semantics: divergent content on first observation surfaces as `hash_differs` | Expected behavior. Add the path to `ignored.yaml` if the divergence is intentional. |
 | Frequent acquire/release events in `agent-coherence-status` | Per-turn Stop-hook release of uncommitted grants. Normal end-of-turn behavior. | No action. Telemetry counter `intra_task_acquire_release_total` quantifies. |
 | `state.db` corrupted | Power loss during WAL checkpoint, or SQLite version mismatch | Back up `.coherence/state.db` first — as of the durable-retention schema (issue #55) it holds retained version content, and in a mixed Python/Node workspace the sibling coordinator's live coordination state. Only if the file is genuinely unreadable, remove it to let the next spawn start fresh (this loses retained content); never remove it to "reset" a healthy store. |
 | Coordinator process won't die | Stale `server.pid` after crash | `rm .coherence/server.pid` to clear the lock; next hook fires re-spawn |
