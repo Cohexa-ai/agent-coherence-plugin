@@ -55,6 +55,8 @@ gh api -X PUT repos/Cohexa-ai/agent-coherence-plugin/branches/main/protection \
 JSON
 ```
 
+`required_approving_review_count: 1` is kept deliberately even though it cannot be satisfied today. The repository has a single collaborator, who is therefore the author of every `dev → main` PR, and GitHub refuses self-approval — no review can ever land on a release PR. Keeping the rule means the gate is already in place the day a second maintainer joins, and it is precisely why `enforce_admins` is `false`: releases merge past it with `--admin` (see §2). `tools/check_release_readiness.js` does not assert this field, so changing it will not trip preflight — which also means nothing keeps the doc and the live branch in sync automatically. If you drop the requirement, drop it from this payload and from the live branch in the same change.
+
 ### Configure branch protection on `dev`
 
 Require the same status check contexts. No review required — `dev` is a fast-moving integration branch.
@@ -73,6 +75,56 @@ gh api -X PUT repos/Cohexa-ai/agent-coherence-plugin/branches/dev/protection \
 }
 JSON
 ```
+
+### Configure the `protect-main` branch ruleset
+
+`main` is protected by **two independent systems**, and both must pass. This is the single most confusing thing about this repository's configuration, so read this before debugging any "why won't this merge" question:
+
+| Layer | Configured by | Admin bypass |
+|---|---|---|
+| Classic branch protection | `/branches/main/protection` (above) | via `enforce_admins: false` |
+| `protect-main` ruleset | `/rulesets` (below) | via the ruleset's own bypass list |
+
+**A ruleset bypass actor does not exempt you from classic branch protection, and vice versa.** They are evaluated separately. A PR showing "Review required" while you hold ruleset bypass is being blocked by the *classic* layer.
+
+The ruleset's bypass list must contain **Repository admin** (`bypass_mode: always`); without it, no release can merge, because the review requirement above is unsatisfiable. Bypass actors are not settable through this endpoint's payload — add them in **Settings → Rules → protect-main → Bypass list**, and verify with:
+
+```bash
+gh api repos/Cohexa-ai/agent-coherence-plugin/rulesets --jq '.[] | select(.name=="protect-main") | .id' \
+  | xargs -I{} gh api repos/Cohexa-ai/agent-coherence-plugin/rulesets/{} \
+    --jq '{methods: (.rules[]|select(.type=="pull_request")|.parameters.allowed_merge_methods), rules: [.rules[].type], bypass: [.bypass_actors[].actor_type]}'
+```
+
+**`allowed_merge_methods` must include `merge`, and `required_linear_history` must NOT be present.** §2 step 2 merges the release with a merge commit; a squash-only ruleset makes that procedure unexecutable, and `required_linear_history` forbids merge commits outright. v0.4.0 shipped with the ruleset in exactly that state, which is why it was squash-merged and why `dev` then needed a manual reconcile (PR #112) — the recurring conflict §2 step 2 warns about. To correct it:
+
+```bash
+gh api -X PUT repos/Cohexa-ai/agent-coherence-plugin/rulesets/$(gh api repos/Cohexa-ai/agent-coherence-plugin/rulesets --jq '.[] | select(.name=="protect-main") | .id') \
+  --input - <<'JSON'
+{
+  "name": "protect-main",
+  "target": "branch",
+  "enforcement": "active",
+  "conditions": {"ref_name": {"include": ["~DEFAULT_BRANCH"], "exclude": []}},
+  "rules": [
+    {"type": "deletion"},
+    {"type": "non_fast_forward"},
+    {"type": "pull_request", "parameters": {
+      "allowed_merge_methods": ["merge", "squash"],
+      "dismiss_stale_reviews_on_push": false,
+      "dismissal_restriction": {"allowed_actors": [], "enabled": false},
+      "require_code_owner_review": false,
+      "require_extra_approval_for_unattributed_changes": true,
+      "require_last_push_approval": false,
+      "required_approving_review_count": 1,
+      "required_review_thread_resolution": true,
+      "required_reviewers": []
+    }}
+  ]
+}
+JSON
+```
+
+Nothing verifies this automatically — `tools/check_release_readiness.js` checks the *tag* ruleset (below), not this one. If a release merge is ever rejected on merge method, this is the cause.
 
 ### Configure tag protection ruleset for `refs/tags/v*`
 
@@ -105,7 +157,7 @@ JSON
 node tools/check_release_readiness.js
 ```
 
-Expect: three `✓` lines and exit 0.
+Expect: six `✓` lines and exit 0 (`0 failure(s), 0 warning(s)`).
 
 ---
 
@@ -113,19 +165,35 @@ Expect: three `✓` lines and exit 0.
 
 Replace `X.Y.Z` with the target version (e.g. `0.3.2`) throughout.
 
+**Read this before you start: the release merge requires `--admin`.** `main` requires one approving review (§1), and that requirement is structurally unsatisfiable in this repository — the single collaborator authors every release PR, and GitHub refuses self-approval. `enforce_admins: false` is set deliberately so an admin can merge past it. Be aware of what that costs: `--admin` bypasses *all* of `main`'s protection, not just the review gate — required status checks and the strict up-to-date rule are skipped too. Step 1's "verify CI is green" is therefore a hard gate rather than a courtesy; it is the only thing checking CI on the release merge.
+
 1. **Open the `dev → main` PR.** Title is `release: vX.Y.Z` so it's easy to find in the PR history.
 
    ```bash
    gh pr create --base main --head dev --title "release: vX.Y.Z"
    ```
 
-   Verify CI is green on every required job (the contexts list in §1) before continuing.
+   Note the PR number it prints — `<N>` in step 2.
 
-2. **Merge with rebase.** Rebase preserves the commit identity so the tag in step 7 points at the same SHA that existed on `dev`.
+   Verify CI is green on every required job (the contexts list in §1) before continuing. Nothing enforces this for you: the `--admin` merge in step 2 skips the required status checks.
+
+2. **Merge with a merge commit, as an admin.** The tag in step 7 points at `main`'s merge commit, whose tree is identical to `dev`'s tip. The tag does *not* point at a SHA that already existed on `dev`, and cannot be made to — see below.
 
    ```bash
-   gh pr merge --rebase
+   gh pr merge <N> --admin --merge
    ```
+
+   **Do not use `--rebase`.** Every topic branch lands on `dev` through a PR merge, so `dev` always carries merge commits — the v0.4.0 release PR carried 19 — and GitHub cannot rebase a branch that contains them. The attempt fails with:
+
+   ```
+   GraphQL: This branch can't be rebased (mergePullRequest)
+   ```
+
+   Confirmed on the v0.4.0 release, 2026-08-23. Preserving `dev`'s commit SHAs on `main` is not achievable under this branching model, so the tag identifies the release by tree, not by SHA lineage.
+
+   **Do not use `--squash` either.** It would collapse the release into a single commit with no ancestry link to `dev`, permanently diverging the two branches and turning §3's forward-merge into a recurring conflict. This is not hypothetical: v0.4.0 was squash-merged, and the next forward-merge came back as `add/add` conflicts across every file the release touched, needing a hand-resolved reconcile (PR #112).
+
+   **If the merge is rejected on merge method**, the `protect-main` ruleset is squash-only — fix it per §1 before continuing. That is the state v0.4.0 shipped in.
 
 3. **Sync local `main`.**
 

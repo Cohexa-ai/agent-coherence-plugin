@@ -96,10 +96,22 @@ jobs:
     # node-gyp invocation dies immediately. The soft masks stay as
     # defense-in-depth. The runtime smoke test can't catch this; the install
     # must (plus the config.gypi assertion in zero_python_smoke.test.ts).
+    #
+    # npm 11 gates package install scripts behind an allowScripts allowlist.
+    # That gate only WARNS by default, so this job would sail past it — but
+    # better-sqlite3's install script IS `prebuild-install`, the prebuilt
+    # download itself. A user whose npmrc sets strict-allow-scripts gets a
+    # hard ESTRICTALLOWSCRIPTS failure, and one with ignore-scripts gets a
+    # silently binary-less tree. Turning strict ON here makes package.json's
+    # allowScripts entry a tested contract instead of a hope: any dependency
+    # that grows an install script fails this job until it is covered
+    # explicitly. npm 10 (Node 22's bundled npm) does not know the config
+    # and ignores it, so the matrix stays green either way.
     env:
       npm_config_python: /nonexistent
       PYTHON: /nonexistent
       NODE_GYP_FORCE_PYTHON: /nonexistent
+      npm_config_strict_allow_scripts: "true"
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1

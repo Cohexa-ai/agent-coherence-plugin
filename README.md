@@ -31,6 +31,8 @@ When one session is about to act on an artifact another session has updated, the
 
 > ⚠ Stale read: `docs/plans/feature-x.md` was updated by session `90b1dfd3` at `2026-05-23T13:42:18Z`. Current version is v3; you previously saw v1. Consider re-reading `docs/plans/feature-x.md` before acting on stale assumptions.
 
+When Claude Code **compacts** a session (auto-compaction or manual `/compact`), the model's summary can silently drop what the session held and what peers changed around the boundary. The plugin re-grounds the compacted session: a second `SessionStart` hook fires on `source=compact` and the coordinator emits a bounded payload — the grants the session held at compaction (event-anchored: "At compaction you held EXCLUSIVE on `plan.md` (v7) — re-acquire before writing.") and, for every artifact the session touched, the current coordinated version with a stale flag when a peer advanced it past the session's last-observed version. The payload reaches the model at the next user message (and on `--resume`); a live autonomous tool loop additionally receives it on its next tool admit. Delivery is at-most-once per path — one benign duplicate can occur (the mid-loop delivery followed by the next user turn's render), and the payload's closing line ("a more recent read supersedes this notice") makes a second sighting harmless. Sessions with no coordination state get nothing.
+
 For tool-class rules that *can* be expressed as policy ("use rg, not grep"; "never sudo"; "no python -c"), run `agent-coherence-migrate-rules` or the stricter `agent-coherence-migrate-deny` — they propose `permissions.deny` entries derived from prose in CLAUDE.md. `permissions.deny` is structurally stronger than runtime hook denies: the runtime enforces it before the model can choose which tool to invoke.
 
 **Validation signal:** [anthropics/claude-code#59309](https://github.com/anthropics/claude-code/issues/59309) (filed 2026-05-13) plus three documented duplicates (#40459, #19471, #29423) confirm the failure shape across 6 months. Anthropic's position is "use hooks" — that's exactly what this plugin does.
@@ -111,7 +113,7 @@ First-time experience: on your first Read of a tracked file in a workspace, you'
 
 The marketplace add resolves to the latest published release. To pin a specific version: `/plugin marketplace add Cohexa-ai/agent-coherence-plugin@v0.3.1`.
 
-**Two backends. As of the SB-2 front-door fix, a fresh install needs neither step below** — a new workspace defaults to the **Node backend**, which self-provisions on first session (no `pip install`, no manual config). The paths below are for the Python backend or for an explicit choice.
+**Two backends. As of v0.4.0, a fresh install needs neither step below** — a new workspace defaults to the **Node backend**, which self-provisions on first session (no `pip install`, no manual config). The paths below are for the Python backend or for an explicit choice.
 
 **A. Python backend (richest feature set; the default for workspaces created before this change).** Install the library that provides the coordinator + hook client:
 
@@ -137,7 +139,10 @@ After install, restart any running `claude` sessions in your workspace so the ne
 > release that ships `agent-coherence-coordinator` and `agent-coherence-hook-client`
 > (the earlier `0.7.x` line was the LangGraph/CrewAI/AutoGen drop-in only). v0.2
 > strict mode requires `agent-coherence>=0.8.2`; warn-mode (the
-> default) works against `>=0.8.0`. Release page:
+> default) works against `>=0.8.0`. Compaction-aware re-grounding on the
+> Python backend requires `agent-coherence>=0.14.0` — on an older library the
+> `SessionStart` hook fails open and the feature is simply absent (every other
+> behavior is unchanged). The bundled Node backend ships it natively. Release page:
 > [Cohexa-ai/agent-coherence](https://github.com/Cohexa-ai/agent-coherence/releases).
 
 ### Other targets (Cursor, Codex, Copilot, etc.)
@@ -197,7 +202,7 @@ The coordinator creates `.coherence/` at your repo root automatically. Inside it
 
 | File | Purpose | Auto-gitignored |
 |---|---|---|
-| `state.db` | SQLite-WAL artifact state. Per-artifact MESI state, versions, SHA-256 content hashes. **Never** raw file content (KTD-13). | ✓ |
+| `state.db` | SQLite-WAL artifact state. Per-artifact MESI state, versions, SHA-256 content hashes. **Never** raw file content. | ✓ |
 | `hook.secret` | Bearer token for hook auth, mode `0600`. 32 random bytes hex-encoded. | ✓ |
 | `server.pid` | Coordinator process discovery (`<pid>\n<port>\nbackend=...\n`). | ✓ |
 | `tracked.yaml` | Your opt-in patterns (gitignore-style globs). Commit if you want the tracked set to apply across team checkouts. | Operator's choice |
@@ -277,7 +282,7 @@ pytest -m protocol_corpus
 |---|---|---|
 | Agents still hit stale-spec collisions silently | `pip install agent-coherence` step missed, or `agent-coherence-hook-client` not on PATH | Confirm `which agent-coherence-coordinator agent-coherence-hook-client` both resolve. If `pip install` succeeded but binaries aren't found, check that your shell's PATH includes the install prefix's `bin/` (e.g. `~/.local/bin` for user installs). |
 | Plugin load failure / silent no-op | Coordinator backend not installed | Run `claude --include-hook-events --output-format stream-json "echo test"` and look for `plugin_errors` in the init event. If `hook-load-failed` appears, the plugin's hooks.json references commands not on PATH. |
-| Stale-warning shown when worktrees just have different branches checked out | Filesystem-state semantics: divergent content on first observation surfaces as `hash_differs` (KTD-9) | Expected behavior. Add the path to `ignored.yaml` if the divergence is intentional. |
+| Stale-warning shown when worktrees just have different branches checked out | Filesystem-state semantics: divergent content on first observation surfaces as `hash_differs` | Expected behavior. Add the path to `ignored.yaml` if the divergence is intentional. |
 | Frequent acquire/release events in `agent-coherence-status` | Per-turn Stop-hook release of uncommitted grants. Normal end-of-turn behavior. | No action. Telemetry counter `intra_task_acquire_release_total` quantifies. |
 | `state.db` corrupted | Power loss during WAL checkpoint, or SQLite version mismatch | Back up `.coherence/state.db` first — as of the durable-retention schema (issue #55) it holds retained version content, and in a mixed Python/Node workspace the sibling coordinator's live coordination state. Only if the file is genuinely unreadable, remove it to let the next spawn start fresh (this loses retained content); never remove it to "reset" a healthy store. |
 | Coordinator process won't die | Stale `server.pid` after crash | `rm .coherence/server.pid` to clear the lock; next hook fires re-spawn |
@@ -323,6 +328,9 @@ The plugin-shipped path requires a Claude Code platform change — tracked in [a
 | HTTP-type hooks not viable on v2.1.131 (internal Phase E.0 probe 2A) | hooks.json URL templating fails strict-URL schema validation at load time | v0.2 ships command-type hooks via `agent-coherence-hook-client` — works on v2.1.131. If a future Claude Code version supports URL templating, an HTTP-type variant can be added as a perf optimization. |
 | `claude agents` subcommand not in coverage scope | The v2.1.131 subcommand is a management UI, not a session spawner; no PreToolUse hooks to capture | Use Agent View, multi-terminal, or Task-tool subagents (all in scope). |
 | Single-user, single-host workstation only | Trust boundary is the OS user; `hook.secret` mode 0600 is the load-bearing fence | Not suitable for shared developer machines, CI runners with multiple developers, or cross-host coordination. |
+| Compaction re-grounding: one residual duplicate | A mid-loop deferred delivery is later followed by the platform re-rendering the compaction attachment at the next user turn; the two sightings can differ if state moved between them | The staler rendering is the later one — the payload's closing line ("a more recent read supersedes this notice") and event-anchored wording make the duplicate benign. |
+| Compaction re-grounding: first compaction after upgrade can't flag staleness | The last-observed comparand starts NULL for rows recorded before the upgrade, and never-observed rows are deliberately never flagged | Staleness detection becomes accurate as sessions read/commit after the upgrade. Not a bug — the alternative (flagging never-observed rows) would false-alarm on every untouched artifact. |
+| Compaction re-grounding: fail-open loss on a cold coordinator | If the coordinator is down or still starting at the compact boundary, the SessionStart hook emits `{}` and that compaction's re-grounding is lost on both paths | Rare mid-session (the coordinator is warm); matches the plugin's universal fail-open contract — coordination never blocks the session. |
 
 ### Resolved in v0.2–v0.3
 

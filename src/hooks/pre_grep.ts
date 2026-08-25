@@ -21,6 +21,7 @@ import {
   nowTick as nowTickFn,
   readSubagentId,
 } from "./_common.js";
+import { deliverPendingReground, writeFastAdmit } from "./reground.js";
 
 interface PreGrepBody {
   session_id?: unknown;
@@ -46,10 +47,17 @@ export async function handlePreGrep(
     writeError(res, 400, "missing or empty path");
     return;
   }
+  const sessionId: string = body.session_id;
 
+  // SB-10 U8 (KTD6): the allow-attach seam — runs after the strict-deny
+  // decision; deny bodies pass through untouched.
+  const withReground = (result: object): Record<string, unknown> =>
+    deliverPendingReground(deps, sessionId, body as Record<string, unknown>, result);
+
+  // SB-10 U8 (KTD6): the zero-tracked exit goes through writeFastAdmit's compact-pending peek.
   const trackedPaths = deps.registry.artifactNamesUnderPrefix(searchRoot);
   if (trackedPaths.length === 0) {
-    writeJson(res, 200, { status: "fresh" });
+    writeFastAdmit(res, deps, sessionId, body as Record<string, unknown>, { status: "fresh" });
     return;
   }
 
@@ -99,7 +107,7 @@ export async function handlePreGrep(
   const noticeText = drainNoticeText(deps, agentId);
 
   if (staleSummaries.length === 0 && noticeText === null) {
-    writeJson(res, 200, { status: "fresh" });
+    writeJson(res, 200, withReground({ status: "fresh" }));
     return;
   }
 
@@ -131,7 +139,8 @@ export async function handlePreGrep(
   } else {
     resp.status = "fresh";
   }
-  writeJson(res, 200, resp);
+  // Notices/stale prose are already merged, so the re-ground block lands last.
+  writeJson(res, 200, withReground(resp));
 }
 
 /** Parse + dispatch helper for use from server.ts. */

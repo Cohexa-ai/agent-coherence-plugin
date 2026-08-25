@@ -9,7 +9,7 @@
  * (`agent-coherence`). Run before any `v*` tag push to confirm the GitHub
  * side is configured for fail-closed publishing.
  *
- * Six checks (1–3 and 5–6 shell out to `gh api`; 4 is filesystem-only):
+ * Seven checks (all but 4 shell out to `gh api`; 4 is filesystem-only):
  *
  *   1. main branch protection is configured. 404 → fail (run setup commands
  *      in docs/RELEASE.md §1). 403 → warn (CI token lacks admin scope).
@@ -22,6 +22,16 @@
  *      the rulesets list, fetches the full body of each tag-targeting
  *      active ruleset, and verifies `conditions.ref_name.include` covers
  *      `refs/tags/v*`. 403 → warn.
+ *
+ *   3b. The BRANCH ruleset covering the default branch does not block the
+ *      documented release merge: `required_linear_history` absent, `merge`
+ *      present in `allowed_merge_methods` (an absent list means all methods),
+ *      and an admin bypass actor present. This is a different ruleset from
+ *      check 3 with different rules — v0.4.0 shipped with it squash-only,
+ *      which made §2 step 2 unexecutable, so the release was squash-merged,
+ *      dev lost its ancestry link, and the next forward-merge conflicted
+ *      across the whole release surface. No branch ruleset at all → pass
+ *      (classic protection alone is a valid configuration). 403 → warn.
  *
  *   4. package.json, .claude-plugin/plugin.json, and
  *      .claude-plugin/marketplace.json declare one identical version, and —
@@ -313,6 +323,135 @@ function checkTagRuleset(slug) {
     'No active tag protection ruleset matches refs/tags/v*. ' +
     'Run the gh api POST command in docs/RELEASE.md §1.'
   );
+}
+
+// -----------------------------------------------------------------------------
+// Check: the protect-main BRANCH ruleset (distinct from the tag ruleset above)
+// -----------------------------------------------------------------------------
+
+/** Merge methods §2 step 2 requires; squash alone makes the release unmergeable. */
+const REQUIRED_MERGE_METHOD = 'merge';
+/** Forbids merge commits outright — incompatible with the merge-commit release. */
+const FORBIDDEN_RULE = 'required_linear_history';
+/** Without an admin bypass no release can merge: main's review rule is unsatisfiable. */
+const ADMIN_BYPASS_ACTORS = new Set(['RepositoryRole', 'OrganizationAdmin']);
+
+/**
+ * Pure verdict over one branch ruleset body → { ok, detail }.
+ *
+ * Split out from the gh plumbing so the corpus can exercise the rule logic
+ * without a network round-trip. `body` is the /rulesets/{id} response shape.
+ */
+export function evaluateBranchRuleset(body) {
+  const label = body?.name ?? 'branch ruleset';
+  const rules = Array.isArray(body?.rules) ? body.rules : [];
+  const problems = [];
+
+  if (rules.some((r) => r?.type === FORBIDDEN_RULE)) {
+    problems.push(
+      `'${FORBIDDEN_RULE}' forbids the merge commit docs/RELEASE.md §2 step 2 creates`,
+    );
+  }
+
+  const pr = rules.find((r) => r?.type === 'pull_request');
+  if (pr) {
+    const methods = pr.parameters?.allowed_merge_methods;
+    // Absent means "all methods allowed" — only an explicit list can exclude one.
+    if (Array.isArray(methods) && !methods.includes(REQUIRED_MERGE_METHOD)) {
+      problems.push(
+        `allowed_merge_methods is [${methods.join(', ')}] — '${REQUIRED_MERGE_METHOD}' is missing, ` +
+        'so the release PR cannot be merged as documented',
+      );
+    }
+  }
+
+  const bypass = Array.isArray(body?.bypass_actors) ? body.bypass_actors : [];
+  if (!bypass.some((a) => ADMIN_BYPASS_ACTORS.has(a?.actor_type))) {
+    problems.push(
+      'no admin bypass actor — main\'s review requirement is unsatisfiable, so releases cannot merge at all',
+    );
+  }
+
+  if (problems.length > 0) {
+    return { ok: false, detail: `'${label}': ${problems.join('; ')}. Fix per docs/RELEASE.md §1.` };
+  }
+  return { ok: true, detail: `'${label}' permits the documented merge-commit release` };
+}
+
+/**
+ * Check: an active branch ruleset targeting the default branch must not block
+ * the release procedure. Added after v0.4.0, where a squash-only ruleset made
+ * §2 step 2 unexecutable — the release was squash-merged instead, dev lost its
+ * ancestry link, and the next forward-merge conflicted across the whole release
+ * surface. The tag-ruleset check above deliberately does not cover this: it is
+ * a different ruleset with different rules.
+ */
+function checkBranchRuleset(slug) {
+  const name = 'branch ruleset';
+  const listRes = ghApi(`repos/${slug}/rulesets`);
+  if (!listRes.ok) {
+    if (listRes.status === 'http_403') {
+      return result(name, WARN, 'check skipped (HTTP 403 — token lacks admin scope). Verify locally.');
+    }
+    if (listRes.status === 'gh_missing') {
+      return result(name, FAIL, 'gh CLI not found on PATH');
+    }
+    // A 404 here means no rulesets at all — classic protection may be the only
+    // layer, which is a valid (if undocumented) configuration. Warn, don't fail.
+    if (listRes.status === 'http_404') {
+      return result(name, WARN, 'no rulesets endpoint response; branch ruleset not verified');
+    }
+    return result(name, FAIL, oneLine(listRes.stderr) || 'gh api failed');
+  }
+
+  let rulesets;
+  try {
+    rulesets = JSON.parse(listRes.stdout);
+  } catch {
+    return result(name, FAIL, 'rulesets endpoint returned non-JSON');
+  }
+  if (!Array.isArray(rulesets)) {
+    return result(name, FAIL, 'rulesets endpoint returned unexpected shape');
+  }
+
+  const candidates = rulesets.filter(
+    (rs) => rs && typeof rs === 'object' && rs.target === 'branch' && rs.enforcement === 'active' && rs.id != null,
+  );
+  if (candidates.length === 0) {
+    return result(name, PASS, 'no active branch ruleset — classic protection is the only layer');
+  }
+
+  const verdicts = [];
+  for (const rs of candidates) {
+    const detailRes = ghApi(`repos/${slug}/rulesets/${rs.id}`);
+    if (!detailRes.ok) {
+      verdicts.push({ ok: false, detail: `could not read ruleset id=${rs.id}` });
+      continue;
+    }
+    let body;
+    try {
+      body = JSON.parse(detailRes.stdout);
+    } catch {
+      verdicts.push({ ok: false, detail: `ruleset id=${rs.id} returned non-JSON` });
+      continue;
+    }
+    // Only rulesets covering the default branch gate the release.
+    const includes = body?.conditions?.ref_name?.include;
+    const coversDefault =
+      Array.isArray(includes) &&
+      (includes.includes('~DEFAULT_BRANCH') || includes.includes('refs/heads/main'));
+    if (!coversDefault) continue;
+    verdicts.push(evaluateBranchRuleset(body));
+  }
+
+  if (verdicts.length === 0) {
+    return result(name, PASS, 'no active branch ruleset targets the default branch');
+  }
+  const failures = verdicts.filter((v) => !v.ok);
+  if (failures.length > 0) {
+    return result(name, FAIL, failures.map((f) => f.detail).join(' | '));
+  }
+  return result(name, PASS, verdicts.map((v) => v.detail).join('; '));
 }
 
 // -----------------------------------------------------------------------------
@@ -871,6 +1010,7 @@ function main() {
     checkMainBranchProtection(slug),
     checkDevBranchProtection(slug),
     checkTagRuleset(slug),
+    checkBranchRuleset(slug),
     checkVersionSync(),
     ...requiredContextsChecks(slug),
   ];

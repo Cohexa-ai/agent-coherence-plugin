@@ -28,6 +28,7 @@ import { preReadRoute } from "./hooks/pre_read.js";
 import { preEditRoute } from "./hooks/pre_edit.js";
 import { postEditRoute } from "./hooks/post_edit.js";
 import { sessionStopRoute } from "./hooks/session_stop.js";
+import { sessionStartRoute } from "./hooks/session_start.js";
 import { preBashRoute } from "./hooks/pre_bash.js";
 import { preGrepRoute } from "./hooks/pre_grep.js";
 import { postEditCasRoute } from "./hooks/post_edit_cas.js";
@@ -292,6 +293,11 @@ export function createServer(options: ServerOptions): Server {
       }
       if (path === "/hooks/session-stop") {
         sessionStopRoute(req, res, hookDeps, MAX_REQUEST_BODY_BYTES).catch(handle500);
+        return;
+      }
+      // SB-10 U6 — post-compaction re-grounding (Python coordinator parity).
+      if (path === "/hooks/session-start") {
+        sessionStartRoute(req, res, hookDeps, MAX_REQUEST_BODY_BYTES).catch(handle500);
         return;
       }
       // Zero-Python Unit 2 routes (Python coordinator parity).
