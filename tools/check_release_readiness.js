@@ -32,6 +32,10 @@
  *      dev lost its ancestry link, and the next forward-merge conflicted
  *      across the whole release surface. No branch ruleset at all → pass
  *      (classic protection alone is a valid configuration). 403 → warn.
+ *      `bypass_actors` is admin-scoped and OMITTED from the response for
+ *      non-admin viewers (the release workflow's GITHUB_TOKEN included), so
+ *      an absent key downgrades the bypass sub-check to a verify-locally
+ *      warning; the merge-method/linear-history sub-checks stay hard.
  *
  *   4. package.json, .claude-plugin/plugin.json, and
  *      .claude-plugin/marketplace.json declare one identical version, and —
@@ -106,12 +110,11 @@ function resolveRepoSlug() {
     if (slug) return slug;
     console.warn(
       `warning: could not parse repo slug from package.json repository.url ` +
-      `(${url ?? 'missing'}); falling back to ${FALLBACK_SLUG}`
+        `(${url ?? 'missing'}); falling back to ${FALLBACK_SLUG}`
     );
   } catch (err) {
     console.warn(
-      `warning: could not read package.json (${err.message}); ` +
-      `falling back to ${FALLBACK_SLUG}`
+      `warning: could not read package.json (${err.message}); ` + `falling back to ${FALLBACK_SLUG}`
     );
   }
   return FALLBACK_SLUG;
@@ -183,7 +186,7 @@ function checkMainBranchProtection(slug) {
       name,
       FAIL,
       'Branch protection on `main` is not configured. ' +
-      'Run the gh api PUT command in docs/RELEASE.md §1.'
+        'Run the gh api PUT command in docs/RELEASE.md §1.'
     );
   }
   if (res.status === 'http_403') {
@@ -228,17 +231,12 @@ function checkDevBranchProtection(slug) {
       return result(
         name,
         FAIL,
-        'Dev branch does not exist on origin. ' +
-        'Run the gh commands in docs/RELEASE.md §1.'
+        'Dev branch does not exist on origin. ' + 'Run the gh commands in docs/RELEASE.md §1.'
       );
     }
     // Branch exists (or its existence couldn't be ruled out as 404) →
     // the original 404 was on /protection, meaning unprotected.
-    return result(
-      name,
-      FAIL,
-      'Branch protection on `dev` is not configured.'
-    );
+    return result(name, FAIL, 'Branch protection on `dev` is not configured.');
   }
   if (res.status === 'gh_missing') {
     return result(name, FAIL, 'gh CLI not found on PATH');
@@ -266,7 +264,7 @@ function checkTagRuleset(slug) {
         name,
         FAIL,
         'No active tag protection ruleset matches refs/tags/v*. ' +
-        'Run the gh api POST command in docs/RELEASE.md §1.'
+          'Run the gh api POST command in docs/RELEASE.md §1.'
       );
     }
     if (listRes.status === 'gh_missing') {
@@ -287,7 +285,8 @@ function checkTagRuleset(slug) {
 
   const candidates = rulesets.filter(
     (rs) =>
-      rs && typeof rs === 'object' &&
+      rs &&
+      typeof rs === 'object' &&
       rs.target === 'tag' &&
       rs.enforcement === 'active' &&
       rs.id != null
@@ -297,7 +296,7 @@ function checkTagRuleset(slug) {
       name,
       FAIL,
       'No active tag protection ruleset matches refs/tags/v*. ' +
-      'Run the gh api POST command in docs/RELEASE.md §1.'
+        'Run the gh api POST command in docs/RELEASE.md §1.'
     );
   }
 
@@ -321,7 +320,7 @@ function checkTagRuleset(slug) {
     name,
     FAIL,
     'No active tag protection ruleset matches refs/tags/v*. ' +
-    'Run the gh api POST command in docs/RELEASE.md §1.'
+      'Run the gh api POST command in docs/RELEASE.md §1.'
   );
 }
 
@@ -348,9 +347,7 @@ export function evaluateBranchRuleset(body) {
   const problems = [];
 
   if (rules.some((r) => r?.type === FORBIDDEN_RULE)) {
-    problems.push(
-      `'${FORBIDDEN_RULE}' forbids the merge commit docs/RELEASE.md §2 step 2 creates`,
-    );
+    problems.push(`'${FORBIDDEN_RULE}' forbids the merge commit docs/RELEASE.md §2 step 2 creates`);
   }
 
   const pr = rules.find((r) => r?.type === 'pull_request');
@@ -360,20 +357,41 @@ export function evaluateBranchRuleset(body) {
     if (Array.isArray(methods) && !methods.includes(REQUIRED_MERGE_METHOD)) {
       problems.push(
         `allowed_merge_methods is [${methods.join(', ')}] — '${REQUIRED_MERGE_METHOD}' is missing, ` +
-        'so the release PR cannot be merged as documented',
+          'so the release PR cannot be merged as documented'
       );
     }
   }
 
-  const bypass = Array.isArray(body?.bypass_actors) ? body.bypass_actors : [];
-  if (!bypass.some((a) => ADMIN_BYPASS_ACTORS.has(a?.actor_type))) {
-    problems.push(
-      'no admin bypass actor — main\'s review requirement is unsatisfiable, so releases cannot merge at all',
-    );
+  // `bypass_actors` is admin-scoped: GitHub OMITS the key entirely for viewers
+  // without admin access — the release workflow's GITHUB_TOKEN included — and
+  // returns it (even as []) for admins. Key-absence therefore means "cannot
+  // verify from here", never "none configured"; only a PRESENT list without an
+  // admin actor is the real unmergeable-release failure. The v0.5.0 tag run
+  // proved the distinction matters: the check hard-failed the release from CI
+  // on a ruleset that was correctly configured.
+  let bypassUnverified = false;
+  if (body != null && typeof body === 'object' && 'bypass_actors' in body) {
+    const bypass = Array.isArray(body.bypass_actors) ? body.bypass_actors : [];
+    if (!bypass.some((a) => ADMIN_BYPASS_ACTORS.has(a?.actor_type))) {
+      problems.push(
+        "no admin bypass actor — main's review requirement is unsatisfiable, so releases cannot merge at all"
+      );
+    }
+  } else {
+    bypassUnverified = true;
   }
 
   if (problems.length > 0) {
     return { ok: false, detail: `'${label}': ${problems.join('; ')}. Fix per docs/RELEASE.md §1.` };
+  }
+  if (bypassUnverified) {
+    return {
+      ok: true,
+      unverified: true,
+      detail:
+        `'${label}' permits the documented merge-commit release; ` +
+        'bypass actors are not visible to this token (admin-scoped field) — verify the admin bypass locally',
+    };
   }
   return { ok: true, detail: `'${label}' permits the documented merge-commit release` };
 }
@@ -391,7 +409,11 @@ function checkBranchRuleset(slug) {
   const listRes = ghApi(`repos/${slug}/rulesets`);
   if (!listRes.ok) {
     if (listRes.status === 'http_403') {
-      return result(name, WARN, 'check skipped (HTTP 403 — token lacks admin scope). Verify locally.');
+      return result(
+        name,
+        WARN,
+        'check skipped (HTTP 403 — token lacks admin scope). Verify locally.'
+      );
     }
     if (listRes.status === 'gh_missing') {
       return result(name, FAIL, 'gh CLI not found on PATH');
@@ -415,7 +437,12 @@ function checkBranchRuleset(slug) {
   }
 
   const candidates = rulesets.filter(
-    (rs) => rs && typeof rs === 'object' && rs.target === 'branch' && rs.enforcement === 'active' && rs.id != null,
+    (rs) =>
+      rs &&
+      typeof rs === 'object' &&
+      rs.target === 'branch' &&
+      rs.enforcement === 'active' &&
+      rs.id != null
   );
   if (candidates.length === 0) {
     return result(name, PASS, 'no active branch ruleset — classic protection is the only layer');
@@ -450,6 +477,9 @@ function checkBranchRuleset(slug) {
   const failures = verdicts.filter((v) => !v.ok);
   if (failures.length > 0) {
     return result(name, FAIL, failures.map((f) => f.detail).join(' | '));
+  }
+  if (verdicts.some((v) => v.unverified)) {
+    return result(name, WARN, verdicts.map((v) => v.detail).join('; '));
   }
   return result(name, PASS, verdicts.map((v) => v.detail).join('; '));
 }
@@ -761,9 +791,7 @@ function expandJobDisplayNames(jobId, rawName, matrix) {
   const names = new Set();
   for (const combo of cartesian(referenced.map((r) => r.values))) {
     referenced.forEach((r, i) => byKey.set(r.key, combo[i]));
-    names.add(
-      template.replace(MATRIX_EXPR_RE, (_, expr) => byKey.get(expr.match(AXIS_REF_RE)[1]))
-    );
+    names.add(template.replace(MATRIX_EXPR_RE, (_, expr) => byKey.get(expr.match(AXIS_REF_RE)[1])));
   }
   return { names: [...names] };
 }
@@ -899,8 +927,8 @@ function checkRequiredContexts(slug, branch, workflow) {
         name,
         FAIL,
         `No required status checks are configured on \`${branch}\` ` +
-        '(or its branch protection is missing entirely). ' +
-        'Run the gh api PUT command in docs/RELEASE.md §1.'
+          '(or its branch protection is missing entirely). ' +
+          'Run the gh api PUT command in docs/RELEASE.md §1.'
       );
     }
     if (res.status === 'gh_missing') {
@@ -924,7 +952,7 @@ function checkRequiredContexts(slug, branch, workflow) {
       name,
       FAIL,
       `Required status checks on \`${branch}\` list no contexts, so merges are ` +
-      'not gated on CI. Run the gh api PUT command in docs/RELEASE.md §1.'
+        'not gated on CI. Run the gh api PUT command in docs/RELEASE.md §1.'
     );
   }
 
@@ -935,9 +963,9 @@ function checkRequiredContexts(slug, branch, workflow) {
       name,
       FAIL,
       `required context(s) ${list} are not produced by any ci.yml job — ` +
-      `PRs into \`${branch}\` can only merge via admin override. Update the ` +
-      'required contexts to the ci.yml job names via the gh api PUT command ' +
-      'in docs/RELEASE.md §1.'
+        `PRs into \`${branch}\` can only merge via admin override. Update the ` +
+        'required contexts to the ci.yml job names via the gh api PUT command ' +
+        'in docs/RELEASE.md §1.'
     );
   }
   if (unrequired.length > 0) {
@@ -946,7 +974,7 @@ function checkRequiredContexts(slug, branch, workflow) {
       name,
       WARN,
       `all ${contexts.length} required context(s) map to ci.yml jobs, ` +
-      `but ci.yml job(s) ${list} are not required on \`${branch}\``
+        `but ci.yml job(s) ${list} are not required on \`${branch}\``
     );
   }
   return result(name, PASS, `${contexts.length} required context(s), all produced by ci.yml jobs`);
@@ -961,7 +989,7 @@ function requiredContextsChecks(slug) {
         'ci.yml job names',
         FAIL,
         `${workflow.error} — cannot validate required status contexts. ` +
-        'If CI moved, update loadWorkflowContexts() in this tool.'
+          'If CI moved, update loadWorkflowContexts() in this tool.'
       ),
     ];
   }
@@ -995,8 +1023,7 @@ function printReport(slug, results) {
   const warnings = results.filter((r) => r.level === WARN).length;
   console.log('');
   console.log(
-    `Result: ${failures} failure(s), ${warnings} warning(s). ` +
-    `See docs/RELEASE.md §1.`
+    `Result: ${failures} failure(s), ${warnings} warning(s). ` + `See docs/RELEASE.md §1.`
   );
 }
 
