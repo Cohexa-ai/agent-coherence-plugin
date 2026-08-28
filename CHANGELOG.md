@@ -6,6 +6,12 @@ Alpha — APIs and the `hooks.json` wire shape may change before `v1.0`.
 
 The canonical release-notes surface is [GitHub Releases](https://github.com/Cohexa-ai/agent-coherence-plugin/releases); this file mirrors that history in a structured format for operators who prefer a single browsable timeline.
 
+## [Unreleased]
+
+### Internal
+
+- **Prior-art survey for cross-host coherence** ([docs/research/2026-08-28-cross-host-prior-art.md](docs/research/2026-08-28-cross-host-prior-art.md)). Research note only — no behavior change. Maps each local coordination mechanism that does not survive a host boundary (`checkSingleWriter` under `BEGIN IMMEDIATE`, the `BIND_HOST` loopback invariant, filesystem-scoped `hook.secret` auth, host-free `sessionToAgentId`, `heartbeats`/`deadline_tick` liveness) to the open-source project that has already solved it, with a reading order. Two findings drive it: the advisory tier (`additionalContext`, no `permissionDecision`) needs version vectors rather than consensus and degrades correctly under partition, while strict mode needs lease-plus-fencing-token exclusion — so the two can ship on different schedules; and the Jepsen etcd 3.4.3 result (~18% of acknowledged updates lost under process pauses shorter than the lease TTL) is the exact failure `deadline_tick` inherits once hosts are separated. Also records the negative result that prompted the branch: `pi-subagents` coordinates over an **in-process** event bus, has no cross-host capability, and is not usable as a reference architecture.
+
 ## [0.5.0] — 2026-08-25
 
 **A compacted session no longer forgets what it held: the coordinator re-grounds it — grants at compaction, plus which artifacts peers moved — and provisioning survives Node major upgrades, script-blocked installs, and stale builds.**
