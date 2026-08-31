@@ -34,7 +34,7 @@
     "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^26.2.0",
     "@typescript-eslint/eslint-plugin": "^8.67.0",
-    "@typescript-eslint/parser": "^8.60.1",
+    "@typescript-eslint/parser": "^8.68.0",
     "eslint": "^10.9.0",
     "globals": "^17.11.0",
     "prettier": "^3.9.6",
