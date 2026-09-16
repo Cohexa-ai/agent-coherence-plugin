@@ -29,6 +29,7 @@ import {
   type StaleSummary,
   staleReadWarning,
   editCollisionWarning,
+  preemptionNoticeText,
   shortSessionId,
 } from "../hook_payloads.js";
 
@@ -81,6 +82,43 @@ test("emitStrictDeny: byte-identical reason (real writer, fractional ts) + no ad
       "the same operation will produce the same denial.",
   });
   assert.equal("additionalContext" in out, false);
+});
+
+test("warn renderers speak Python's timestamp dialect, not toISOString's", () => {
+  // `pythonIsoUtc` exists in this module and reproduces `datetime.isoformat()`
+  // exactly, but only `emitStrictDeny` used it; the three warn renderers called
+  // a module-private `isoUtc` (`toISOString()`), so every stale warning, every
+  // collision warning and every preemption bullet spelled the same instant
+  // `...T12:00:00.000Z` where Python writes `...T12:00:00+00:00`. The corpus
+  // cannot catch this: its harness scrubs both spellings to the same `<TS>`.
+  const Z_TIMESTAMP = /\d{2}:\d{2}:\d{2}(?:\.\d+)?Z/;
+
+  const stale = staleReadWarning({
+    path: "plan.md",
+    current_version: 2,
+    prior_version_seen_by_session: 1,
+    last_writer_session_id: "f2f7eab3-1111-4111-8111-111111111111",
+    last_writer_at_unix_ts: 1748088000,
+    warning_generated_at_unix_ts: 1748088000.5,
+    hash_differs: false,
+  });
+  assert.match(stale, /2025-05-24T12:00:00\+00:00/);
+  assert.match(stale, /2025-05-24T12:00:00\.500000\+00:00/);
+  assert.doesNotMatch(stale, Z_TIMESTAMP);
+
+  const collision = editCollisionWarning("f2f7eab3-1111-4111-8111-111111111111", 1748088000, "plan.md");
+  assert.match(collision, /2025-05-24T12:00:00\+00:00/);
+  assert.doesNotMatch(collision, Z_TIMESTAMP);
+
+  const notice = preemptionNoticeText([
+    {
+      artifactPath: "plan.md",
+      preempterSessionShort: "f2f7eab3",
+      preemptedAtUnixTs: 1748088000,
+    },
+  ]);
+  assert.match(notice, /2025-05-24T12:00:00\+00:00/);
+  assert.doesNotMatch(notice, Z_TIMESTAMP);
 });
 
 test("emitStrictDeny: <unknown> sentinel preserved verbatim (never sliced to '<unknow')", () => {

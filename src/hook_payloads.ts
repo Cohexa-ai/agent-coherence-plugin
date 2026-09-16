@@ -233,10 +233,6 @@ export function nowUnix(): number {
   return Date.now() / 1000;
 }
 
-function isoUtc(unixSeconds: number): string {
-  return new Date(unixSeconds * 1000).toISOString();
-}
-
 /**
  * Build the stale-read additionalContext text. Per-invocation variation
  * via `warning_generated_at_unix_ts` (handler-time now()) guarantees
@@ -245,8 +241,8 @@ function isoUtc(unixSeconds: number): string {
  */
 export function staleReadWarning(summary: StaleSummary): string {
   const lastWriterShort = shortSessionId(summary.last_writer_session_id);
-  const lastWriterTs = isoUtc(summary.last_writer_at_unix_ts);
-  const generatedTs = isoUtc(summary.warning_generated_at_unix_ts);
+  const lastWriterTs = pythonIsoUtc(summary.last_writer_at_unix_ts);
+  const generatedTs = pythonIsoUtc(summary.warning_generated_at_unix_ts);
 
   const priorClause =
     summary.prior_version_seen_by_session !== null
@@ -280,8 +276,8 @@ export function editCollisionWarning(
   path: string,
 ): string {
   const holderShort = shortSessionId(holderSessionId);
-  const holderTs = isoUtc(holderAcquiredAtUnixTs);
-  const detectedTs = isoUtc(nowUnix());
+  const holderTs = pythonIsoUtc(holderAcquiredAtUnixTs);
+  const detectedTs = pythonIsoUtc(nowUnix());
   return (
     `⚠ Concurrent edit detected at ${detectedTs} (UTC): another session ` +
     `(${holderShort}) has been editing ${path} since ${holderTs}. ` +
@@ -315,7 +311,7 @@ export function preemptionNoticeText(
   if (notices.length === 0) return "";
   const lines = notices.map(
     (n) =>
-      `  • ${n.artifactPath} preempted by session ${n.preempterSessionShort} at ${isoUtc(n.preemptedAtUnixTs)}`,
+      `  • ${n.artifactPath} preempted by session ${n.preempterSessionShort} at ${pythonIsoUtc(n.preemptedAtUnixTs)}`,
   );
   const intro =
     totalCount === 1
@@ -419,6 +415,23 @@ export const SESSION_START_TOUCHED_LINE_TEMPLATE = "{path} is at v{current}.";
  */
 export const SESSION_START_OVERFLOW_LINE_TEMPLATE =
   "Plus {count} more — run agent-coherence-status for the full picture.";
+
+/**
+ * R5 overflow line for the PREEMPTION-NOTICE block. Deliberately not the
+ * artifact template above.
+ *
+ * That line names `agent-coherence-status`, which is honest for coalesced
+ * artifact lines — `GET /status` carries `tracked_artifacts[].path/.version`.
+ * It carries no notice data at ANY disclosure tier, so pointing a coalesced
+ * notice there promises a surface that cannot answer. Session-start PEEKS the
+ * notice queue rather than popping it, so the overflowed rows genuinely do
+ * survive and reach the model on the next tracked-file admit; this says that
+ * instead. Mirrors Python's `_build_preemption_text`, which dropped the same
+ * /status pointer for the same reason.
+ */
+export const SESSION_START_NOTICE_OVERFLOW_LINE_TEMPLATE =
+  "Plus {count} more preemptions since your last activity, still queued — " +
+  "they surface on your next tracked-file operation.";
 
 /**
  * KTD8 grouping: the parent agent's lines render first (no prefix), then
