@@ -219,3 +219,108 @@ test('lockfile drift: an npm alias resolves by its real package name, never by i
   );
   assert.equal(v.ok, true);
 });
+
+test('lockfile drift: a bump to one lineage is not masked by a shared lower lineage', () => {
+  // The shape that broke a name-keyed collapse, taken from this repo's real
+  // lockfile: `ignore` is installed at two lineages at once, 5.x nested under
+  // eslint and 7.x at top level. Collapsing each side to one lowest-per-NAME
+  // makes both branches report 5.3.2 and the 7.x bump becomes invisible —
+  // the guard then certifies, in writing, a dev that installs the older copy.
+  const v: Verdict = evaluateLockfileDrift(
+    rawLock({
+      'node_modules/eslint/node_modules/ignore': { version: '5.3.2' },
+      'node_modules/ignore': { version: '7.1.0' },
+    }),
+    rawLock({
+      'node_modules/eslint/node_modules/ignore': { version: '5.3.2' },
+      'node_modules/ignore': { version: '7.0.5' },
+    })
+  );
+  assert.equal(v.ok, false);
+  assert.match(v.detail, /ignore/);
+  assert.match(v.detail, /7\.0\.5/);
+  assert.match(v.detail, /7\.1\.0/);
+});
+
+test('lockfile drift: a bump that crosses a major boundary is still caught', () => {
+  // Keying purely by `name@major` would file main's 11.x and dev's 8.x under
+  // different keys, find no counterpart, and skip. That is not hypothetical:
+  // of the twenty packages this guard found on its first live run, three
+  // (file-entry-cache 8->11, flat-cache 4->6, keyv 4->5) were major bumps, so
+  // a lineage key with no lower-major fallback would have reported seventeen.
+  const v: Verdict = evaluateLockfileDrift(
+    rawLock({ 'node_modules/file-entry-cache': { version: '11.1.5' } }),
+    rawLock({ 'node_modules/file-entry-cache': { version: '8.0.0' } })
+  );
+  assert.equal(v.ok, false);
+  assert.match(v.detail, /file-entry-cache/);
+  assert.match(v.detail, /8\.0\.0/);
+  assert.match(v.detail, /11\.1\.5/);
+});
+
+test("lockfile drift: a lineage dev carries and main does not is dev's own tree, not drift", () => {
+  // dev pulling in an extra older lineage that main never had is a different
+  // question from a missed forward-merge, and merging main into dev cannot
+  // change it. Flagging it would block releases on dev's own dependency tree.
+  const v: Verdict = evaluateLockfileDrift(
+    rawLock({ 'node_modules/ignore': { version: '7.0.5' } }),
+    rawLock({
+      'node_modules/eslint/node_modules/ignore': { version: '5.3.2' },
+      'node_modules/ignore': { version: '7.0.5' },
+    })
+  );
+  assert.equal(v.ok, true);
+});
+
+test('lockfile drift: a structurally empty packages map fails closed, it does not certify', () => {
+  // `{"packages":{}}` is object-shaped but carries no evidence. Comparing two
+  // empty maps finds nothing and would otherwise reach the PASS text, so the
+  // guard would certify dev as patched having compared precisely nothing.
+  const v: Verdict = evaluateLockfileDrift(
+    rawLock({ 'node_modules/x': { version: '2.0.0' } }),
+    { lockfileVersion: 3, packages: {} }
+  );
+  assert.equal(v.ok, false);
+  assert.match(v.detail, /cannot prove dev is patched/);
+});
+
+test('lockfile drift: a lockfile with a root entry and no dependencies is valid, not malformed', () => {
+  // The structural check must accept a real project that simply has no
+  // dependencies yet, or it would fail closed on a legitimate lockfile.
+  const v: Verdict = evaluateLockfileDrift(
+    { lockfileVersion: 3, packages: { '': { name: 'p', version: '0.5.0' } } },
+    { lockfileVersion: 3, packages: { '': { name: 'p', version: '0.5.0' } } }
+  );
+  assert.equal(v.ok, true);
+});
+
+test('lockfile drift: a nested-only verdict does not prescribe a forward-merge', () => {
+  // dev is at parity on the top-level copy; its only older copy sits under a
+  // dependency main does not carry at all. The forward-merge the standard
+  // remedy names is inert here — main has nothing at that position to give —
+  // so telling the operator to run it strands them at a gate they cannot clear.
+  const v: Verdict = evaluateLockfileDrift(
+    rawLock({ 'node_modules/js-yaml': { version: '4.3.2' } }),
+    rawLock({
+      'node_modules/js-yaml': { version: '4.3.2' },
+      'node_modules/newdep/node_modules/js-yaml': { version: '4.3.1' },
+    })
+  );
+  assert.equal(v.ok, false);
+  // Assert the absence of the PRESCRIPTION, not of the word: the corrective
+  // message names the forward-merge precisely to say it will not clear this.
+  assert.doesNotMatch(v.detail, /forward-merge main into dev/);
+  assert.match(v.detail, /will not clear it/);
+  assert.match(v.detail, /nested/);
+});
+
+test('lockfile drift: a top-level verdict still prescribes the forward-merge', () => {
+  // The ordinary missed-forward-merge case must keep its remedy; the nested
+  // branch above must not swallow it.
+  const v: Verdict = evaluateLockfileDrift(
+    rawLock({ 'node_modules/js-yaml': { version: '4.3.2' } }),
+    rawLock({ 'node_modules/js-yaml': { version: '4.3.1' } })
+  );
+  assert.equal(v.ok, false);
+  assert.match(v.detail, /forward-merge/);
+});

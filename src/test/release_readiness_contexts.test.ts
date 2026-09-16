@@ -237,11 +237,22 @@ function ghAction(dir: string, file: string, behavior: RscBehavior): string {
   return `echo "gh: ${label} (HTTP ${behavior.code})" >&2; exit 1`;
 }
 
+/** How the fake `gh` answers check 3c's two `contents` reads. */
+type LockBehavior =
+  | { kind: 'same' }
+  | { kind: 'perRef'; main: Record<string, string>; dev: Record<string, string> }
+  | { kind: 'http'; code: 403 | 404 };
+
 /**
  * Fake `gh` serving checks 1–3 as healthy and the two required_status_checks
  * endpoints per scenario. Returns the bin dir to prepend to PATH.
  */
-function writeFakeGh(dir: string, rscMain: RscBehavior, rscDev: RscBehavior): string {
+function writeFakeGh(
+  dir: string,
+  rscMain: RscBehavior,
+  rscDev: RscBehavior,
+  lock: LockBehavior = { kind: 'same' }
+): string {
   const binDir = join(dir, 'bin');
   mkdirSync(binDir, { recursive: true });
   const protection = join(dir, 'protection.json');
@@ -257,20 +268,42 @@ function writeFakeGh(dir: string, rscMain: RscBehavior, rscDev: RscBehavior): st
       conditions: { ref_name: { include: ['refs/tags/v*'] } },
     })
   );
-  // Check 3c reads both branches' lockfiles through the `contents` endpoint.
-  // Serve the SAME body on each ref so these scenarios carry no drift and keep
-  // asserting only what they are about (required-status-context handling).
-  // Without this the endpoint 404s, and 3c fails closed by design, which would
-  // turn every exit-0 expectation below into a failure for an unrelated reason.
-  const lockBody = JSON.stringify({
-    lockfileVersion: 3,
-    packages: { '': { name: 'p', version: '0.5.0' }, 'node_modules/x': { version: '1.0.0' } },
-  });
-  const contents = join(dir, 'lockfile_contents.json');
-  writeFileSync(
-    contents,
-    JSON.stringify({ encoding: 'base64', content: Buffer.from(lockBody).toString('base64') })
-  );
+  // Check 3c reads both branches' lockfiles through the `contents` endpoint,
+  // keyed on `?ref=`. The default serves the SAME body on each ref so the
+  // required-status-context scenarios carry no drift and keep asserting only
+  // what they are about. Without any handler the endpoint 404s and 3c fails
+  // closed by design, turning every exit-0 expectation into an unrelated
+  // failure. `perRef` and `http` exist so 3c's own wiring can be exercised
+  // end to end -- serving one shared body for every ref cannot distinguish
+  // the check running and passing from the check never running at all.
+  const lockEnvelope = (versions: Record<string, string>): string => {
+    const packages: Record<string, unknown> = { '': { name: 'p', version: '0.5.0' } };
+    for (const [name, version] of Object.entries(versions)) {
+      packages[`node_modules/${name}`] = { version };
+    }
+    const body = JSON.stringify({ lockfileVersion: 3, packages });
+    return JSON.stringify({ encoding: 'base64', content: Buffer.from(body).toString('base64') });
+  };
+  let contentsCases: string[];
+  if (lock.kind === 'http') {
+    const label = lock.code === 404 ? 'Not Found' : 'Forbidden';
+    contentsCases = [
+      `  repos/*/contents/package-lock.json*) echo "gh: ${label} (HTTP ${lock.code})" >&2; exit 1 ;;`,
+    ];
+  } else if (lock.kind === 'perRef') {
+    const mainLock = join(dir, 'lock_main.json');
+    const devLock = join(dir, 'lock_dev.json');
+    writeFileSync(mainLock, lockEnvelope(lock.main));
+    writeFileSync(devLock, lockEnvelope(lock.dev));
+    contentsCases = [
+      `  repos/*/contents/package-lock.json*ref=main) cat "${mainLock}" ;;`,
+      `  repos/*/contents/package-lock.json*ref=dev) cat "${devLock}" ;;`,
+    ];
+  } else {
+    const contents = join(dir, 'lockfile_contents.json');
+    writeFileSync(contents, lockEnvelope({ x: '1.0.0' }));
+    contentsCases = [`  repos/*/contents/package-lock.json*) cat "${contents}" ;;`];
+  }
   const script = [
     '#!/usr/bin/env bash',
     '# Fake gh for release-readiness e2e tests: supports `gh api <path>`.',
@@ -279,7 +312,7 @@ function writeFakeGh(dir: string, rscMain: RscBehavior, rscDev: RscBehavior): st
     `  repos/*/branches/main/protection/required_status_checks) ${ghAction(dir, 'rsc_main.json', rscMain)} ;;`,
     `  repos/*/branches/dev/protection/required_status_checks) ${ghAction(dir, 'rsc_dev.json', rscDev)} ;;`,
     `  repos/*/branches/*/protection) cat "${protection}" ;;`,
-    `  repos/*/contents/package-lock.json*) cat "${contents}" ;;`,
+    ...contentsCases,
     `  repos/*/rulesets/1) cat "${rulesetDetail}" ;;`,
     `  repos/*/rulesets) cat "${rulesets}" ;;`,
     '  *) echo "gh: Not Found (HTTP 404)" >&2; exit 1 ;;',
@@ -303,11 +336,12 @@ function runTool(binDir: string): { status: number; stdout: string; stderr: stri
 function withFakeGh(
   rscMain: RscBehavior,
   rscDev: RscBehavior,
-  run: (res: { status: number; stdout: string; stderr: string }) => void
+  run: (res: { status: number; stdout: string; stderr: string }) => void,
+  lock: LockBehavior = { kind: 'same' }
 ): void {
   const dir = mkdtempSync(join(tmpdir(), 'release-readiness-'));
   try {
-    run(runTool(writeFakeGh(dir, rscMain, rscDev)));
+    run(runTool(writeFakeGh(dir, rscMain, rscDev, lock)));
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -389,6 +423,77 @@ test('e2e: 403 (token lacks admin scope) → warning, exit 0', () => {
     assert.match(res.stdout, /⚠ main required status contexts: check skipped \(HTTP 403/);
     assert.match(res.stdout, /⚠ dev required status contexts: check skipped \(HTTP 403/);
   });
+});
+
+// -----------------------------------------------------------------------------
+// End-to-end: check 3c (lockfile drift) wiring
+// -----------------------------------------------------------------------------
+//
+// The pure verdict function is covered exhaustively in
+// release_readiness_lockfile_drift.test.ts. What those tests cannot reach is
+// everything between `main()` and that function: the `contents?ref=` URL, the
+// base64/JSON decode, the per-ref status branching, and the registration in
+// main()'s results array. Without the cases below, deleting
+// `checkLockfileDrift(slug),` from that array leaves the entire suite green.
+
+test('e2e: dev behind main on a package → exit 1 naming it', () => {
+  withFakeGh(
+    ALL_CONTEXTS,
+    ALL_CONTEXTS,
+    (res) => {
+      assert.equal(res.status, 1, `drift must fail the preflight:\n${res.stdout}\n${res.stderr}`);
+      assert.match(res.stdout, /✗ lockfile drift \(dev vs main\)/);
+      assert.match(res.stdout, /js-yaml \(dev 4\.3\.1 < main 4\.3\.2\)/);
+      assert.match(res.stdout, /forward-merge main into dev/);
+    },
+    { kind: 'perRef', main: { 'js-yaml': '4.3.2' }, dev: { 'js-yaml': '4.3.1' } }
+  );
+});
+
+test('e2e: the two refs are read distinctly and in the right order', () => {
+  // dev AHEAD of main must pass. This is what separates a wrapper that reads
+  // two distinct refs from one that reads `main` twice (which would report no
+  // drift here too, but fails the test above), and from one that swapped the
+  // arguments to evaluateLockfileDrift (which would report drift here).
+  withFakeGh(
+    ALL_CONTEXTS,
+    ALL_CONTEXTS,
+    (res) => {
+      assert.equal(res.status, 0, `dev ahead is normal, not drift:\n${res.stdout}`);
+      assert.match(res.stdout, /✓ lockfile drift \(dev vs main\)/);
+    },
+    { kind: 'perRef', main: { 'js-yaml': '4.3.1' }, dev: { 'js-yaml': '4.3.2' } }
+  );
+});
+
+test('e2e: a 403 on the contents endpoint warns and does not block the release', () => {
+  // 403 means the token cannot read contents at all, which says nothing about
+  // the lockfiles. Every other read failure fails closed; this one must not,
+  // or a low-scope CI token would block every release it cannot assess.
+  withFakeGh(
+    ALL_CONTEXTS,
+    ALL_CONTEXTS,
+    (res) => {
+      assert.equal(res.status, 0, `contents 403 must warn, not fail:\n${res.stdout}`);
+      assert.match(res.stdout, /⚠ lockfile drift \(dev vs main\): check skipped \(HTTP 403/);
+    },
+    { kind: 'http', code: 403 }
+  );
+});
+
+test('e2e: an unreadable lockfile fails the preflight rather than certifying', () => {
+  // A 404 on the contents endpoint is lost evidence, not proof of health. The
+  // guard must not exit 0 having compared nothing.
+  withFakeGh(
+    ALL_CONTEXTS,
+    ALL_CONTEXTS,
+    (res) => {
+      assert.equal(res.status, 1, `lost evidence must fail closed:\n${res.stdout}`);
+      assert.match(res.stdout, /✗ lockfile drift \(dev vs main\)/);
+      assert.match(res.stdout, /cannot prove dev is patched/);
+    },
+    { kind: 'http', code: 404 }
+  );
 });
 
 // -----------------------------------------------------------------------------

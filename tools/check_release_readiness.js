@@ -43,11 +43,17 @@
  *      never examined — making the main->dev forward-merge half the remediation
  *      and the half that gets skipped. Alert #5 closed four seconds after its
  *      fix merged to main and forty-one minutes before dev got the same bump.
- *      Compares by package NAME (npm hoists the same package between top-level
- *      and nested paths) taking each side's LOWEST version, so a branch holding
- *      both a patched and a vulnerable copy still fails. Unreadable lockfile →
- *      fail, not warn: a guard that cannot get evidence must not certify.
- *      403 → warn (token cannot read contents at all).
+ *      Compares by `name@major` lineage, never by lockfile path (npm hoists the
+ *      same package between top-level and nested paths) and never by bare name
+ *      (one name is routinely installed at two lineages, which makes both sides
+ *      collapse to a shared minimum and hides a bump to the higher one). Within
+ *      a lineage the LOWEST version wins, so a branch holding both a patched and
+ *      a vulnerable copy still fails; a main lineage absent from dev falls back
+ *      to dev's highest lower major, so a bump across a major boundary is caught
+ *      too. A lineage dev carries and main does not is dev's own tree, not drift.
+ *      Unreadable or structurally empty lockfile → fail, not warn: a guard that
+ *      cannot get evidence must not certify. 403 → warn (token cannot read
+ *      contents at all).
  *
  *   4. package.json, .claude-plugin/plugin.json, and
  *      .claude-plugin/marketplace.json declare one identical version, and —
@@ -518,9 +524,8 @@ const PLAIN_VERSION = /^\d+(?:\.\d+)*$/;
  * version bump, so skipping the exotic cases costs nothing real.
  */
 function comparePlainVersions(a, b) {
-  const PLAIN = PLAIN_VERSION;
   if (typeof a !== 'string' || typeof b !== 'string') return null;
-  if (!PLAIN.test(a) || !PLAIN.test(b)) return null;
+  if (!PLAIN_VERSION.test(a) || !PLAIN_VERSION.test(b)) return null;
   const pa = a.split('.').map(Number);
   const pb = b.split('.').map(Number);
   for (let i = 0; i < Math.max(pa.length, pb.length); i += 1) {
@@ -532,25 +537,32 @@ function comparePlainVersions(a, b) {
 }
 
 /**
- * Collapse a lockfile's `packages{}` to package NAME -> lowest version present.
+ * Collapse a lockfile's `packages{}` to `name@major` -> lowest version in that
+ * lineage, with the entry's name, major and originating path.
  *
- * Keyed by name, never by lockfile path. npm hoists a package freely between
- * `node_modules/x` and `node_modules/dep/node_modules/x`, and this repo's own
- * lockfile already carries four nested duplicates (`eslint-visitor-keys` at
- * three paths, `ignore` at two). A path-keyed comparison therefore misses the
- * shape that matters most here: dev holding a vulnerable copy nested under a
- * dependency while main carries only the patched top-level one.
+ * Never keyed by lockfile path: npm hoists a package freely between
+ * `node_modules/x` and `node_modules/dep/node_modules/x`, so a path key misses
+ * dev holding a vulnerable copy nested under a dependency while main carries
+ * only the patched top-level one.
  *
- * LOWEST wins because the question is "does dev install anything older than
- * main does". A branch carrying both the patched and the vulnerable copy still
- * installs the vulnerable one, so taking the highest would certify it clean.
+ * Keyed by name AND major, not by name alone, because one name is routinely
+ * installed at two lineages at once — this lockfile has `ignore` at 5.3.2
+ * (nested under eslint) and 7.0.5 (top level), and `eslint-visitor-keys` at
+ * 3.4.3 and 5.0.1. Collapsing per name makes both branches report the same
+ * shared minimum, and a bump to the higher lineage becomes invisible: the
+ * guard then certifies, in writing, a dev that installs the older copy.
+ *
+ * LOWEST wins within a lineage because the question is "does dev install
+ * anything older than main does". A branch carrying both the patched and the
+ * vulnerable copy still installs the vulnerable one, so taking the highest
+ * would certify it clean.
  *
  * An npm alias (`"node_modules/lru": { name: "lru-cache", version: ... }`)
  * resolves through its `name` field, so two branches aliasing one specifier to
  * different packages group under different names and are never compared —
  * which would otherwise report a version move on a package that does not exist.
  */
-function lowestVersionByName(packages) {
+function lowestVersionByLineage(packages) {
   const lowest = new Map();
   for (const [path, entry] of Object.entries(packages)) {
     // The root "" entry is the project's own version: main sits at the
@@ -564,12 +576,42 @@ function lowestVersionByName(packages) {
         ? entry.name
         : path.split('node_modules/').pop();
     if (!name) continue;
-    const current = lowest.get(name);
+    const major = Number(entry.version.split('.')[0]);
+    const key = `${name}@${major}`;
+    const current = lowest.get(key);
     if (current === undefined || comparePlainVersions(entry.version, current.version) === -1) {
-      lowest.set(name, { version: entry.version, path });
+      lowest.set(key, { name, major, version: entry.version, path });
     }
   }
   return lowest;
+}
+
+/**
+ * The dev-side entry that a main-side lineage should be compared against, or
+ * null when dev carries nothing comparable.
+ *
+ * Same lineage on both sides is the ordinary case. When dev has no entry in
+ * that lineage at all, fall back to dev's highest LOWER major of the same
+ * name: that is a bump which crossed a major boundary and never reached dev.
+ * Without the fallback a lineage key silently skips exactly those — three of
+ * the twenty packages on this guard's first live run (file-entry-cache 8->11,
+ * flat-cache 4->6, keyv 4->5) were major bumps, so it would have reported
+ * seventeen and called the rest clean.
+ *
+ * A lineage dev carries that main does not is deliberately NOT a finding: that
+ * is dev's own dependency tree, not a missed forward-merge, and merging main
+ * into dev cannot change it.
+ */
+function devCounterpart(devLowest, mainEntry) {
+  const exact = devLowest.get(`${mainEntry.name}@${mainEntry.major}`);
+  if (exact !== undefined) return exact;
+  let best = null;
+  for (const candidate of devLowest.values()) {
+    if (candidate.name !== mainEntry.name) continue;
+    if (candidate.major >= mainEntry.major) continue;
+    if (best === null || candidate.major > best.major) best = candidate;
+  }
+  return best;
 }
 
 /**
@@ -593,7 +635,14 @@ function lowestVersionByName(packages) {
  * package absent from dev is a different question this guard does not answer.
  */
 export function evaluateLockfileDrift(mainLock, devLock) {
-  const usable = (p) => p != null && typeof p === 'object' && !Array.isArray(p);
+  // An object-shaped body is not yet evidence. `{"packages":{}}` parses, both
+  // sides collapse to nothing, no comparison happens, and the PASS text below
+  // would then certify dev as patched having compared precisely zero packages.
+  // npm always writes the root "" entry, so requiring it distinguishes a real
+  // lockfile from a structurally empty one while still accepting a legitimate
+  // project that has no dependencies yet.
+  const usable = (p) =>
+    p != null && typeof p === 'object' && !Array.isArray(p) && Object.hasOwn(p, '');
   const mainPkgs = mainLock?.packages;
   const devPkgs = devLock?.packages;
   if (!usable(mainPkgs) || !usable(devPkgs)) {
@@ -603,34 +652,42 @@ export function evaluateLockfileDrift(mainLock, devLock) {
     };
   }
 
-  const mainLowest = lowestVersionByName(mainPkgs);
-  const devLowest = lowestVersionByName(devPkgs);
+  const mainLowest = lowestVersionByLineage(mainPkgs);
+  const devLowest = lowestVersionByLineage(devPkgs);
 
   const behind = [];
-  for (const [name, mainEntry] of mainLowest) {
-    const devEntry = devLowest.get(name);
-    if (devEntry === undefined) continue;
+  let anyTopLevel = false;
+  for (const mainEntry of mainLowest.values()) {
+    const devEntry = devCounterpart(devLowest, mainEntry);
+    if (devEntry === null) continue;
     if (comparePlainVersions(devEntry.version, mainEntry.version) === -1) {
       // Name the nesting when the older copy is not the top-level one; the
       // bare lockfile path reads like a scoped package name and is not
       // something `npm ls` or an advisory would accept.
-      const nested = devEntry.path.includes('/node_modules/')
-        ? ` [dev's older copy is nested at ${devEntry.path}]`
-        : '';
-      behind.push(`${name} (dev ${devEntry.version} < main ${mainEntry.version})${nested}`);
+      const isNested = devEntry.path.includes('/node_modules/');
+      if (!isNested) anyTopLevel = true;
+      const nested = isNested ? ` [dev's older copy is nested at ${devEntry.path}]` : '';
+      behind.push(
+        `${mainEntry.name} (dev ${devEntry.version} < main ${mainEntry.version})${nested}`
+      );
     }
   }
 
   if (behind.length > 0) {
     behind.sort();
-    return {
-      ok: false,
-      detail:
-        `dev is behind main on ${behind.length} package(s): ${behind.join(', ')}. ` +
-        'Dependabot only ever patches the default branch, so a green security alert does not mean ' +
+    // The remedy depends on where the older copy sits. A top-level copy is the
+    // missed-forward-merge case the guard exists for. When EVERY older copy is
+    // nested, main may not carry that package at that position at all, and
+    // merging main into dev cannot change dev's own transitive tree — naming
+    // the forward-merge there strands the operator at a gate it cannot clear.
+    const remedy = anyTopLevel
+      ? 'Dependabot only ever patches the default branch, so a green security alert does not mean ' +
         'dev is patched — forward-merge main into dev. (docs/RELEASE.md §3 step 5 documents the ' +
-        'mechanics; §2 has no equivalent step.)',
-    };
+        'mechanics; §2 has no equivalent step.)'
+      : "Every older copy above is nested under one of dev's dependencies, so check whether main " +
+        'carries that package at that position at all — if it does not, this is dev’s own ' +
+        'transitive tree and a forward-merge will not clear it.';
+    return { ok: false, detail: `dev is behind main on ${behind.length} package(s): ${behind.join(', ')}. ${remedy}` };
   }
   return { ok: true, detail: "no package in dev's lockfile is older than main's" };
 }
