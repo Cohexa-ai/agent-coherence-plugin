@@ -1,0 +1,39 @@
+# Report when `dev`'s lockfile falls behind `main`'s.
+#
+# Dependabot builds its dependency graph from the DEFAULT branch only, so a
+# security advisory raises one alert and one PR, both scoped to `main`, and
+# `dev` is never examined — even though every feature branch is cut from it.
+# The alert then closes on the `main` merge while `dev` is still running the
+# vulnerable version. That has happened twice on js-yaml: alert #5 closed four
+# seconds after PR #102 merged and forty-one minutes before `dev` was patched;
+# alert #6 closed five seconds after PR #128 merged.
+#
+# Triggering on push to `main` catches the drift at the moment it is created —
+# a dependabot bump landing on the default branch — rather than at release
+# time, where the remedy would cost a spent version number. This job blocks
+# nothing: it is a visible red check on the commit that created the drift.
+name: lockfile-drift
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  drift:
+    name: dev lockfile is not behind main
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      # The check shells out to `gh api` for both branches' package-lock.json
+      # and needs no dependencies of its own, so there is no setup-node or
+      # npm ci step: the runner's Node is enough and `tools/*.js` imports only
+      # Node builtins by design.
+      - name: Check dev against main
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: node tools/check_lockfile_drift.js
