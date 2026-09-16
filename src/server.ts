@@ -141,7 +141,15 @@ interface StatusDefaultBody {
   tracked_artifacts: ReadonlyArray<{ id: string; path: string; version: number }>;
   sessions: ReadonlyArray<{
     agent_id: string;
-    agent_name: string;
+    /**
+     * `null` when the SessionRegistry has no name for this holder. The map is
+     * process-local while the holder set comes from durable `agent_states`, so
+     * a grant that outlived the coordinator process that issued it has no
+     * recoverable name — `agent_id` is a one-way uuid5 of the session id.
+     * Python emits `null` in the same case; a sentinel string would put "no
+     * name" into the same type and namespace as real names.
+     */
+    agent_name: string | null;
     states: Record<string, string>;
   }>;
   counts: {
@@ -219,10 +227,13 @@ function handleStatus(req: IncomingMessage, res: ServerResponse, options: Server
         states[art.name] = state;
       }
     }
-    // agent_name falls back to "<unknown>" if the SessionRegistry has not
-    // seen this agent_id (e.g., the agent surfaced via a peer
-    // invalidation but never called register_session itself yet).
-    const agentName = options.sessions.agentIdToName(agentId) ?? "<unknown>";
+    // null, not a sentinel, when the SessionRegistry has not seen this
+    // agent_id — a holder that surfaced via a peer invalidation, or whose
+    // grant outlived the process that issued it. `<unknown>` is prose and
+    // belongs in permissionDecisionReason; this field is a machine-read
+    // identifier, and a string there is indistinguishable from a session
+    // actually named that.
+    const agentName = options.sessions.agentIdToName(agentId);
     return {
       agent_id: agentId,
       agent_name: agentName,

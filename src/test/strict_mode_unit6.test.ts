@@ -20,18 +20,34 @@ import { ArtifactRegistry } from "../registry.js";
 import { PolicyRef } from "../policy.js";
 import { SessionRegistry } from "../sessions.js";
 import { createServer } from "../server.js";
+import { drainNoticeText } from "../hooks/pre_bash.js";
 import {
   emitAllow,
   emitStrictDeny,
   pythonIsoUtc,
   STRICT_MODE_DENY_REASON_TEMPLATE,
   type StaleSummary,
+  staleReadWarning,
+  editCollisionWarning,
+  shortSessionId,
 } from "../hook_payloads.js";
 
 const SID_A = "44444444-4444-4444-8444-444444444444";
 const SID_B = "55555555-5555-5555-8555-555555555555";
 const HASH_1 = "1".repeat(64);
 const HASH_2 = "2".repeat(64);
+
+/**
+ * The `<unknown>` sentinel with its closing bracket dropped — what a bare
+ * `slice(0, 8)` makes of it, and the exact malformed text every sentinel test
+ * here exists to keep out of model-visible prose.
+ *
+ * Excluding `-` as well as `>` is load-bearing: `<unknown-artifact>` is the
+ * artifact-path fallback in all four notice builders (pre_bash, pre_read,
+ * pre_edit, session_start) and legitimately reaches the same prose, so a
+ * lookahead of `(?!>)` alone would fail a notice that truncated nothing.
+ */
+const TRUNCATED_SENTINEL = /<unknown(?![->])/;
 
 // ------------------------------------------------------------ byte parity
 
@@ -79,7 +95,81 @@ test("emitStrictDeny: <unknown> sentinel preserved verbatim (never sliced to '<u
   };
   const out = emitStrictDeny({ source: "pre_read_strict_deny", summary });
   assert.match(out.permissionDecisionReason!, /by session <unknown> at 2025-05-24T12:00:00\+00:00\./);
-  assert.doesNotMatch(out.permissionDecisionReason!, /<unknow[^n]/);
+  assert.doesNotMatch(out.permissionDecisionReason!, TRUNCATED_SENTINEL);
+});
+
+test("staleReadWarning: <unknown> sentinel preserved verbatim (never sliced)", () => {
+  const summary: StaleSummary = {
+    path: "plan.md",
+    current_version: 2,
+    prior_version_seen_by_session: 1,
+    last_writer_session_id: "<unknown>",
+    last_writer_at_unix_ts: 1748088000,
+    warning_generated_at_unix_ts: 1748088001,
+    hash_differs: false,
+  };
+  const text = staleReadWarning(summary);
+  assert.match(text, /session <unknown> at/);
+  assert.doesNotMatch(text, TRUNCATED_SENTINEL);
+});
+
+test("editCollisionWarning: <unknown> sentinel preserved verbatim (never sliced)", () => {
+  const text = editCollisionWarning("<unknown>", 1748088000, "plan.md");
+  assert.match(text, /\(<unknown>\)/);
+  assert.doesNotMatch(text, TRUNCATED_SENTINEL);
+});
+
+test("warn renderers still shorten a REAL session id to 8 chars", () => {
+  const sid = "f2f7eab3-1111-4111-8111-111111111111";
+  const stale = staleReadWarning({
+    path: "plan.md",
+    current_version: 2,
+    prior_version_seen_by_session: 1,
+    last_writer_session_id: sid,
+    last_writer_at_unix_ts: 1748088000,
+    warning_generated_at_unix_ts: 1748088001,
+    hash_differs: false,
+  });
+  assert.match(stale, /session f2f7eab3 at/);
+  assert.equal(stale.includes(sid), false);
+
+  const collision = editCollisionWarning(sid, 1748088000, "plan.md");
+  assert.match(collision, /\(f2f7eab3\)/);
+  assert.equal(collision.includes(sid), false);
+});
+
+test("drainNoticeText: an unresolved preempter keeps its <unknown> sentinel", () => {
+  // Drives the REAL call site (pre_bash.ts drainNoticeText, which pre_grep
+  // also uses), not the shortener. Calling shortSessionId directly here would
+  // pass no matter what the call site does — the defect IS that the call site
+  // sliced raw.
+  const deps = {
+    registry: {
+      popPendingNoticesForAgent: () => [
+        { artifactId: "a1", preempterAgentId: "unresolvable", preemptedAtUnixTs: 1748088000 },
+      ],
+      getArtifactById: () => ({ name: "plan.md" }),
+    },
+    // The preempter is not in the session map — exactly the post-restart case.
+    sessions: { agentIdToSessionId: () => null },
+  } as unknown as Parameters<typeof drainNoticeText>[0];
+
+  const text = drainNoticeText(deps, "victim");
+  assert.ok(text);
+  assert.match(text, /session <unknown> at/);
+  assert.doesNotMatch(text, TRUNCATED_SENTINEL);
+});
+
+test("shortSessionId is the single shortener: sentinel whole, real id to 8", () => {
+  assert.equal(shortSessionId("<unknown>"), "<unknown>");
+  assert.equal(shortSessionId("<unknown-artifact>"), "<unknown-artifact>");
+  assert.equal(shortSessionId("f2f7eab3-1111-4111-8111-111111111111"), "f2f7eab3");
+  // Each case above satisfies BOTH halves of `startsWith("<") && endsWith(">")`
+  // or neither, so either half could be deleted and they would all still pass.
+  // These two are the only inputs that tell the halves apart, and they must be
+  // longer than 8 chars or the slice is a no-op and proves nothing.
+  assert.equal(shortSessionId("<unclosed-sentinel"), "<unclose");
+  assert.equal(shortSessionId("no-open-bracket>"), "no-open-");
 });
 
 test("template placeholder set is locked (KTD-P)", () => {

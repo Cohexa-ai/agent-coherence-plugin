@@ -168,6 +168,21 @@ export function emitAllow(args: {
 }
 
 /**
+ * The 8-char short form of a session id, EXCEPT for a `<...>` sentinel.
+ *
+ * A placeholder like `"<unknown>"` is prose, not an identifier: slicing it to
+ * 8 chars drops the closing angle bracket and ships malformed text
+ * ("<unknown"). Real session ids are 36-char UUIDs, so an 8-char prefix is
+ * unambiguous whenever one is present. Every renderer that shortens a session
+ * id for prose goes through here — the guard used to live in `emitStrictDeny`
+ * alone, and the two warn-mode renderers sliced the sentinel. Mirrors Python's
+ * `hook_payloads.short_session_id`.
+ */
+export function shortSessionId(sessionId: string): string {
+  return sessionId.startsWith("<") && sessionId.endsWith(">") ? sessionId : sessionId.slice(0, 8);
+}
+
+/**
  * Build the strict-mode deny envelope — byte-parity with Python
  * `emit_strict_deny`:
  * - null/absent last_writer → the literal `<unknown>`;
@@ -180,10 +195,7 @@ export function emitAllow(args: {
  */
 export function emitStrictDeny(args: { source: string; summary: StaleSummary }): HookSpecificOutput {
   const lastWriterFull = args.summary.last_writer_session_id || "<unknown>";
-  const lastWriterShort =
-    lastWriterFull.startsWith("<") && lastWriterFull.endsWith(">")
-      ? lastWriterFull
-      : lastWriterFull.slice(0, 8);
+  const lastWriterShort = shortSessionId(lastWriterFull);
   const lastWriterTsIso = pythonIsoUtc(args.summary.last_writer_at_unix_ts);
   const reason = STRICT_MODE_DENY_REASON_TEMPLATE.replaceAll("{path}", args.summary.path)
     .replace("{last_writer_short}", lastWriterShort)
@@ -232,7 +244,7 @@ function isoUtc(unixSeconds: number): string {
  * strict-mode flip. Matches Python `stale_read_warning` prose pattern.
  */
 export function staleReadWarning(summary: StaleSummary): string {
-  const lastWriterShort = summary.last_writer_session_id.slice(0, 8);
+  const lastWriterShort = shortSessionId(summary.last_writer_session_id);
   const lastWriterTs = isoUtc(summary.last_writer_at_unix_ts);
   const generatedTs = isoUtc(summary.warning_generated_at_unix_ts);
 
@@ -267,7 +279,7 @@ export function editCollisionWarning(
   holderAcquiredAtUnixTs: number,
   path: string,
 ): string {
-  const holderShort = holderSessionId.slice(0, 8);
+  const holderShort = shortSessionId(holderSessionId);
   const holderTs = isoUtc(holderAcquiredAtUnixTs);
   const detectedTs = isoUtc(nowUnix());
   return (
