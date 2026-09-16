@@ -19,6 +19,7 @@ import {
   emitStrictDeny,
   nowUnix,
   preemptionNoticeText,
+  shortSessionId,
   type StaleSummary,
 } from "../hook_payloads.js";
 import { detectTrackedPaths } from "./bash_path_detector.js";
@@ -49,7 +50,7 @@ export function drainNoticeText(deps: HookDeps, agentId: string): string | null 
     const preempterSession = deps.sessions.agentIdToSessionId(n.preempterAgentId) ?? "<unknown>";
     return {
       artifactPath: art?.name ?? "<unknown-artifact>",
-      preempterSessionShort: preempterSession.slice(0, 8),
+      preempterSessionShort: shortSessionId(preempterSession),
       preemptedAtUnixTs: n.preemptedAtUnixTs,
     };
   });

@@ -20,6 +20,7 @@ import { ArtifactRegistry } from "../registry.js";
 import { PolicyRef } from "../policy.js";
 import { SessionRegistry } from "../sessions.js";
 import { createServer } from "../server.js";
+import { drainNoticeText } from "../hooks/pre_bash.js";
 import {
   emitAllow,
   emitStrictDeny,
@@ -28,6 +29,7 @@ import {
   type StaleSummary,
   staleReadWarning,
   editCollisionWarning,
+  shortSessionId,
 } from "../hook_payloads.js";
 
 const SID_A = "44444444-4444-4444-8444-444444444444";
@@ -122,6 +124,34 @@ test("warn renderers still shorten a REAL session id to 8 chars", () => {
   const collision = editCollisionWarning(sid, 1748088000, "plan.md");
   assert.match(collision, /\(f2f7eab3\)/);
   assert.equal(collision.includes(sid), false);
+});
+
+test("drainNoticeText: an unresolved preempter keeps its <unknown> sentinel", () => {
+  // Drives the REAL call site (pre_bash.ts drainNoticeText, which pre_grep
+  // also uses), not the shortener. Calling shortSessionId directly here would
+  // pass no matter what the call site does — the defect IS that the call site
+  // sliced raw.
+  const deps = {
+    registry: {
+      popPendingNoticesForAgent: () => [
+        { artifactId: "a1", preempterAgentId: "unresolvable", preemptedAtUnixTs: 1748088000 },
+      ],
+      getArtifactById: () => ({ name: "plan.md" }),
+    },
+    // The preempter is not in the session map — exactly the post-restart case.
+    sessions: { agentIdToSessionId: () => null },
+  } as unknown as Parameters<typeof drainNoticeText>[0];
+
+  const text = drainNoticeText(deps, "victim");
+  assert.ok(text);
+  assert.match(text, /session <unknown> at/);
+  assert.doesNotMatch(text, /<unknow[^n]/);
+});
+
+test("shortSessionId is the single shortener: sentinel whole, real id to 8", () => {
+  assert.equal(shortSessionId("<unknown>"), "<unknown>");
+  assert.equal(shortSessionId("<unknown-artifact>"), "<unknown-artifact>");
+  assert.equal(shortSessionId("f2f7eab3-1111-4111-8111-111111111111"), "f2f7eab3");
 });
 
 test("template placeholder set is locked (KTD-P)", () => {

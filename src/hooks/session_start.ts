@@ -33,6 +33,7 @@ import { sessionToAgentId } from "../agent_id.js";
 import {
   emitSessionStart,
   preemptionNoticeText,
+  shortSessionId,
   SESSION_START_HEADER,
   SESSION_START_GRANT_LINE_TEMPLATE,
   SESSION_START_STALE_LINE_TEMPLATE,
@@ -223,7 +224,7 @@ export function buildSessionStartContext(
           // matches it against the sweep-reclamation sentinel so a coordinator
           // sweep is named as such rather than rendered as a peer session.
           preempterAgentId: n.preempterAgentId,
-          preempterSessionShort: preempterSession.slice(0, 8),
+          preempterSessionShort: shortSessionId(preempterSession),
           preemptedAtUnixTs: n.preemptedAtUnixTs,
         };
       }),
