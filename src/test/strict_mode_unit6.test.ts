@@ -26,6 +26,8 @@ import {
   pythonIsoUtc,
   STRICT_MODE_DENY_REASON_TEMPLATE,
   type StaleSummary,
+  staleReadWarning,
+  editCollisionWarning,
 } from "../hook_payloads.js";
 
 const SID_A = "44444444-4444-4444-8444-444444444444";
@@ -80,6 +82,46 @@ test("emitStrictDeny: <unknown> sentinel preserved verbatim (never sliced to '<u
   const out = emitStrictDeny({ source: "pre_read_strict_deny", summary });
   assert.match(out.permissionDecisionReason!, /by session <unknown> at 2025-05-24T12:00:00\+00:00\./);
   assert.doesNotMatch(out.permissionDecisionReason!, /<unknow[^n]/);
+});
+
+test("staleReadWarning: <unknown> sentinel preserved verbatim (never sliced)", () => {
+  const summary: StaleSummary = {
+    path: "plan.md",
+    current_version: 2,
+    prior_version_seen_by_session: 1,
+    last_writer_session_id: "<unknown>",
+    last_writer_at_unix_ts: 1748088000,
+    warning_generated_at_unix_ts: 1748088001,
+    hash_differs: false,
+  };
+  const text = staleReadWarning(summary);
+  assert.match(text, /session <unknown> at/);
+  assert.doesNotMatch(text, /<unknow[^n]/);
+});
+
+test("editCollisionWarning: <unknown> sentinel preserved verbatim (never sliced)", () => {
+  const text = editCollisionWarning("<unknown>", 1748088000, "plan.md");
+  assert.match(text, /\(<unknown>\)/);
+  assert.doesNotMatch(text, /<unknow[^n]/);
+});
+
+test("warn renderers still shorten a REAL session id to 8 chars", () => {
+  const sid = "f2f7eab3-1111-4111-8111-111111111111";
+  const stale = staleReadWarning({
+    path: "plan.md",
+    current_version: 2,
+    prior_version_seen_by_session: 1,
+    last_writer_session_id: sid,
+    last_writer_at_unix_ts: 1748088000,
+    warning_generated_at_unix_ts: 1748088001,
+    hash_differs: false,
+  });
+  assert.match(stale, /session f2f7eab3 at/);
+  assert.equal(stale.includes(sid), false);
+
+  const collision = editCollisionWarning(sid, 1748088000, "plan.md");
+  assert.match(collision, /\(f2f7eab3\)/);
+  assert.equal(collision.includes(sid), false);
 });
 
 test("template placeholder set is locked (KTD-P)", () => {
