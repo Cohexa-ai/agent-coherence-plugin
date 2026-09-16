@@ -236,10 +236,14 @@ test('cli: only a proven drift may tell the operator dev is missing an update', 
 test('workflow: the guard is wired to run, and to run this tool', () => {
   // Everything above tests a CLI the suite invokes itself. None of it says the
   // workflow ever invokes it — and a guard that never runs is indistinguishable
-  // from a guard that runs clean. These are the four properties that decide
-  // whether this file is live, each one a way it has silently gone inert.
+  // from a guard that runs clean. These are the properties that decide whether
+  // this file is live, each one a way it has silently gone inert.
   const wf = loadYaml(readFileSync(WORKFLOW, 'utf8')) as {
-    on: { push: { branches: string[] } };
+    on: {
+      push: { branches: string[] };
+      schedule?: { cron: string }[];
+      workflow_dispatch?: unknown;
+    };
     jobs: Record<string, { steps: { uses?: string; run?: string }[] }>;
   };
 
@@ -247,6 +251,19 @@ test('workflow: the guard is wired to run, and to run this tool', () => {
   // `dev` is load-bearing, not symmetry: this change merges to dev, so a
   // main-only trigger would leave the guard inert until the next release.
   assert.deepEqual([...wf.on.push.branches].sort(), ['dev', 'main']);
+
+  // The schedule is the ONLY trigger that survives the GITHUB_TOKEN rule: a push
+  // made with that token creates no workflow run, and dependabot-automerge.yml
+  // merges with it, so twelve of main's last thirteen pushes fired nothing at
+  // all. Deleting this entry would not fail any other assertion here while
+  // silently returning the guard to seeing roughly one push in thirteen.
+  assert.ok(Array.isArray(wf.on.schedule), 'the daily schedule trigger must exist');
+  assert.equal(wf.on.schedule?.length, 1);
+  assert.match(wf.on.schedule?.[0]?.cron ?? '', /^\d+\s+\d+\s+\*\s+\*\s+\*$/, 'must run daily');
+
+  // Dispatch is the manual escape hatch, and it works against any ref carrying
+  // this file — `--ref dev` today, `--ref main` only once it lands there.
+  assert.ok('workflow_dispatch' in wf.on, 'manual dispatch must stay available');
 
   const steps = Object.values(wf.jobs).flatMap((job) => job.steps);
   const runs = steps.map((s) => s.run ?? '').join('\n');

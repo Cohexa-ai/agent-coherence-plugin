@@ -33,10 +33,26 @@
  * and imports nothing; `check_release_readiness.js` contributes only the
  * gh-fetching wrapper, because that is where `ghApi` lives.
  *
- * WHEN THIS RUNS. `.github/workflows/lockfile-drift.yml` invokes it on every
- * push to `main` or `dev` — the moment the drift is created, from either side —
- * and on demand via workflow_dispatch. A red check is visible and blocks
- * nothing.
+ * WHEN THIS RUNS, stated carefully, because the obvious reading of the trigger
+ * list in `.github/workflows/lockfile-drift.yml` is wrong twice over.
+ *
+ *   - On push to `dev`, today. Live and verified.
+ *   - On push to `main`, but ONLY once that workflow file is itself on `main`.
+ *     A push-triggered workflow resolves its definition from the ref that was
+ *     pushed, so while this change lives only on `dev` the `main` half of the
+ *     trigger matches nothing. It arms at the release that carries the file
+ *     over. (`gh workflow run --ref main` returning HTTP 422 "Workflow does not
+ *     have 'workflow_dispatch' trigger" is GitHub saying exactly this.)
+ *   - On a daily schedule — also only from the default branch, so it arms at
+ *     the same moment. This is the trigger that actually carries the guard,
+ *     because a push made with `GITHUB_TOKEN` creates no workflow run at all
+ *     and `dependabot-automerge.yml` merges with that token. Twelve of `main`'s
+ *     last thirteen pushes therefore fired nothing; see the workflow file for
+ *     the measurement.
+ *   - On demand, via workflow_dispatch against a ref that CARRIES this file.
+ *     Not "any ref": `--ref dev` works today and `--ref main` does not.
+ *
+ * A red check is visible and blocks nothing.
  *
  * EXIT CODE: 0 only on a proven-clean comparison. Every other outcome exits 1,
  * including the HTTP 403 that stays WARN in the level. The level and the exit
