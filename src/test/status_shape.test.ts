@@ -102,6 +102,41 @@ test("AC-03: tracked_artifacts entries use 'path' (Python parity)", async () => 
   }
 });
 
+test("AC-03: an unnamed holder gets agent_name: null, not a sentinel string", async () => {
+  // The SessionRegistry is process-local while the holder set comes from
+  // durable sqlite agent_states, so a grant that outlived the coordinator
+  // process that issued it has no recoverable name — the agent id is a
+  // one-way uuid5 of the session id. Python emits null there. A "<unknown>"
+  // string puts "no name" into the same type and namespace as real names,
+  // which a consumer cannot tell apart from a session actually called that.
+  const { options, cleanup } = makeOptions();
+  try {
+    // Acquire with an agent id the session map has never seen — exactly the
+    // post-restart orphaned-holder case, without restarting anything.
+    const agentId = "0123456789abcdef0123456789abcdef";
+    assert.equal(options.sessions.agentIdToName(agentId), null);
+    const artId = options.registry.resolveOrRegisterArtifact("plan.md", "abc");
+    options.registry.acquireExclusive(artId, agentId, 0);
+
+    const server = createServer(options);
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
+    try {
+      const { status, body } = await statusBody(server, options.secret);
+      assert.equal(status, 200);
+      const sessions = body.sessions as ReadonlyArray<Record<string, unknown>>;
+      const holder = sessions.find((s) => s.agent_id === agentId);
+      assert.ok(holder, "the durable holder must still be listed");
+      assert.equal(holder.agent_name, null, "an unnamed holder reports null");
+      assert.notEqual(holder.agent_name, "<unknown>");
+      assert.deepEqual(holder.states, { "plan.md": "EXCLUSIVE" });
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  } finally {
+    cleanup();
+  }
+});
+
 test("AC-03: sessions entries carry agent_name + states map (Python parity)", async () => {
   const { options, cleanup } = makeOptions();
   try {
