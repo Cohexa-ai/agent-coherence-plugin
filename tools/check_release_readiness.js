@@ -9,7 +9,7 @@
  * (`agent-coherence`). Run before any `v*` tag push to confirm the GitHub
  * side is configured for fail-closed publishing.
  *
- * Seven checks (all but 4 shell out to `gh api`; 4 is filesystem-only):
+ * Eight checks (all but 4 shell out to `gh api`; 4 is filesystem-only):
  *
  *   1. main branch protection is configured. 404 → fail (run setup commands
  *      in docs/RELEASE.md §1). 403 → warn (CI token lacks admin scope).
@@ -36,6 +36,18 @@
  *      non-admin viewers (the release workflow's GITHUB_TOKEN included), so
  *      an absent key downgrades the bypass sub-check to a verify-locally
  *      warning; the merge-method/linear-history sub-checks stay hard.
+ *
+ *   3c. dev's package-lock.json carries no package older than main's. Dependabot
+ *      builds its dependency graph from the DEFAULT branch only, so a security
+ *      advisory yields one alert and one PR, both scoped to main, and dev is
+ *      never examined — making the main->dev forward-merge half the remediation
+ *      and the half that gets skipped. Alert #5 closed four seconds after its
+ *      fix merged to main and forty-one minutes before dev got the same bump.
+ *      Compares by package NAME (npm hoists the same package between top-level
+ *      and nested paths) taking each side's LOWEST version, so a branch holding
+ *      both a patched and a vulnerable copy still fails. Unreadable lockfile →
+ *      fail, not warn: a guard that cannot get evidence must not certify.
+ *      403 → warn (token cannot read contents at all).
  *
  *   4. package.json, .claude-plugin/plugin.json, and
  *      .claude-plugin/marketplace.json declare one identical version, and —
@@ -135,6 +147,12 @@ function ghApi(path) {
     const stdout = execSync(`gh api ${path}`, {
       encoding: 'utf8',
       stdio: ['pipe', 'pipe', 'pipe'],
+      // Node defaults to 1 MiB and reports an overrun as ENOBUFS with an empty
+      // stderr, which lands in the generic 'other' bucket below — a silent
+      // truncation dressed as an API error. The `contents` endpoint base64s
+      // its payload into a JSON envelope (~1.33x), so package-lock.json alone
+      // would hit the default somewhere around 790 KB.
+      maxBuffer: 64 * 1024 * 1024,
     });
     return { ok: true, stdout, stderr: '' };
   } catch (err) {
@@ -482,6 +500,190 @@ function checkBranchRuleset(slug) {
     return result(name, WARN, verdicts.map((v) => v.detail).join('; '));
   }
   return result(name, PASS, verdicts.map((v) => v.detail).join('; '));
+}
+
+// -----------------------------------------------------------------------------
+// Check 3c: lockfile drift — dev must never run an older package than main
+// -----------------------------------------------------------------------------
+
+/** A version this guard is willing to order. Anything else is skipped, never guessed. */
+const PLAIN_VERSION = /^\d+(?:\.\d+)*$/;
+
+/**
+ * Compare two dotted numeric versions -> -1 | 0 | 1, or null when either side
+ * is not plainly comparable (prerelease, git ref, `link:`/`file:` specifier).
+ *
+ * Null means "do not judge". A wrong FAIL here blocks a release on a false
+ * positive, and the drift this guard exists to catch is always a plain
+ * version bump, so skipping the exotic cases costs nothing real.
+ */
+function comparePlainVersions(a, b) {
+  const PLAIN = PLAIN_VERSION;
+  if (typeof a !== 'string' || typeof b !== 'string') return null;
+  if (!PLAIN.test(a) || !PLAIN.test(b)) return null;
+  const pa = a.split('.').map(Number);
+  const pb = b.split('.').map(Number);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i += 1) {
+    const x = pa[i] ?? 0;
+    const y = pb[i] ?? 0;
+    if (x !== y) return x < y ? -1 : 1;
+  }
+  return 0;
+}
+
+/**
+ * Collapse a lockfile's `packages{}` to package NAME -> lowest version present.
+ *
+ * Keyed by name, never by lockfile path. npm hoists a package freely between
+ * `node_modules/x` and `node_modules/dep/node_modules/x`, and this repo's own
+ * lockfile already carries four nested duplicates (`eslint-visitor-keys` at
+ * three paths, `ignore` at two). A path-keyed comparison therefore misses the
+ * shape that matters most here: dev holding a vulnerable copy nested under a
+ * dependency while main carries only the patched top-level one.
+ *
+ * LOWEST wins because the question is "does dev install anything older than
+ * main does". A branch carrying both the patched and the vulnerable copy still
+ * installs the vulnerable one, so taking the highest would certify it clean.
+ *
+ * An npm alias (`"node_modules/lru": { name: "lru-cache", version: ... }`)
+ * resolves through its `name` field, so two branches aliasing one specifier to
+ * different packages group under different names and are never compared —
+ * which would otherwise report a version move on a package that does not exist.
+ */
+function lowestVersionByName(packages) {
+  const lowest = new Map();
+  for (const [path, entry] of Object.entries(packages)) {
+    // The root "" entry is the project's own version: main sits at the
+    // released one and dev at the in-flight one, so it drifts in both
+    // directions by design and says nothing about dependencies.
+    if (path === '') continue;
+    if (entry == null || typeof entry !== 'object') continue;
+    if (typeof entry.version !== 'string' || !PLAIN_VERSION.test(entry.version)) continue;
+    const name =
+      typeof entry.name === 'string' && entry.name !== ''
+        ? entry.name
+        : path.split('node_modules/').pop();
+    if (!name) continue;
+    const current = lowest.get(name);
+    if (current === undefined || comparePlainVersions(entry.version, current.version) === -1) {
+      lowest.set(name, { version: entry.version, path });
+    }
+  }
+  return lowest;
+}
+
+/**
+ * Pure verdict over the two branches' package-lock.json bodies -> { ok, detail }.
+ *
+ * Dependabot builds its dependency graph from the DEFAULT branch only, so an
+ * advisory yields one alert and one PR, both scoped to main, and dev is never
+ * examined. That makes the main->dev forward-merge half of the remediation
+ * rather than release hygiene — and it is the half that gets skipped. Alert #5
+ * closed four seconds after its fix merged to main and forty-one minutes
+ * before dev received the same bump; by 2026-09-16 twelve main-only dependabot
+ * commits had accumulated unmerged while alert #6 sat open on the same package.
+ *
+ * What the drift actually costs: dev, and every feature branch cut from it,
+ * installs and CI-tests the older version. It does NOT silently regress main
+ * at release time — a three-way merge keeps main's side of a line dev never
+ * touched. That was verified against a real merge rather than assumed, so do
+ * not restore the stronger "the release would regress main" claim.
+ *
+ * Only dev-older-than-main is a finding: dev ahead is the normal state, and a
+ * package absent from dev is a different question this guard does not answer.
+ */
+export function evaluateLockfileDrift(mainLock, devLock) {
+  const usable = (p) => p != null && typeof p === 'object' && !Array.isArray(p);
+  const mainPkgs = mainLock?.packages;
+  const devPkgs = devLock?.packages;
+  if (!usable(mainPkgs) || !usable(devPkgs)) {
+    return {
+      ok: false,
+      detail: 'could not read `packages{}` from one or both lockfiles — cannot prove dev is patched',
+    };
+  }
+
+  const mainLowest = lowestVersionByName(mainPkgs);
+  const devLowest = lowestVersionByName(devPkgs);
+
+  const behind = [];
+  for (const [name, mainEntry] of mainLowest) {
+    const devEntry = devLowest.get(name);
+    if (devEntry === undefined) continue;
+    if (comparePlainVersions(devEntry.version, mainEntry.version) === -1) {
+      // Name the nesting when the older copy is not the top-level one; the
+      // bare lockfile path reads like a scoped package name and is not
+      // something `npm ls` or an advisory would accept.
+      const nested = devEntry.path.includes('/node_modules/')
+        ? ` [dev's older copy is nested at ${devEntry.path}]`
+        : '';
+      behind.push(`${name} (dev ${devEntry.version} < main ${mainEntry.version})${nested}`);
+    }
+  }
+
+  if (behind.length > 0) {
+    behind.sort();
+    return {
+      ok: false,
+      detail:
+        `dev is behind main on ${behind.length} package(s): ${behind.join(', ')}. ` +
+        'Dependabot only ever patches the default branch, so a green security alert does not mean ' +
+        'dev is patched — forward-merge main into dev. (docs/RELEASE.md §3 step 5 documents the ' +
+        'mechanics; §2 has no equivalent step.)',
+    };
+  }
+  return { ok: true, detail: "no package in dev's lockfile is older than main's" };
+}
+
+/**
+ * Check: read both branches' lockfiles and apply the verdict above.
+ *
+ * Read-only — two `contents` GETs.
+ *
+ * FAILS CLOSED. A security guard that cannot get its evidence must not
+ * certify: an unreadable lockfile is a FAIL, not a WARN. The WARN path would
+ * have been worse than useless here, because `main()` exits 0 on WARN, so
+ * every way of losing the evidence — an oversized payload, a renamed branch,
+ * a token without contents scope — would have turned the guard off while the
+ * release went green. The one exception is HTTP 403, which means this token
+ * cannot read contents at all rather than that anything is wrong with the
+ * lockfiles; that stays a WARN so a low-scope CI token does not block a
+ * release it has no ability to assess.
+ */
+function checkLockfileDrift(slug) {
+  const name = 'lockfile drift (dev vs main)';
+
+  const fetchLock = (ref) => {
+    const res = ghApi(`repos/${slug}/contents/package-lock.json?ref=${ref}`);
+    if (!res.ok) return { ok: false, status: res.status };
+    try {
+      const body = JSON.parse(res.stdout);
+      const raw =
+        body.encoding === 'base64'
+          ? Buffer.from(body.content ?? '', 'base64').toString('utf8')
+          : (body.content ?? '');
+      return { ok: true, lock: JSON.parse(raw) };
+    } catch {
+      return { ok: false, status: 'unparseable' };
+    }
+  };
+
+  const fetched = { main: fetchLock('main'), dev: fetchLock('dev') };
+  for (const [ref, res] of Object.entries(fetched)) {
+    if (res.ok) continue;
+    if (res.status === 'gh_missing') return result(name, FAIL, 'gh CLI not found on PATH');
+    if (res.status === 'http_403') {
+      return result(name, WARN, `check skipped (HTTP 403 reading ${ref}). Verify locally.`);
+    }
+    return result(
+      name,
+      FAIL,
+      `could not read package-lock.json on ${ref} (${res.status}) — cannot prove dev is patched`
+    );
+  }
+
+  const verdict = evaluateLockfileDrift(fetched.main.lock, fetched.dev.lock);
+  return result(name, verdict.ok ? PASS : FAIL, verdict.detail);
 }
 
 // -----------------------------------------------------------------------------
@@ -1038,6 +1240,7 @@ function main() {
     checkDevBranchProtection(slug),
     checkTagRuleset(slug),
     checkBranchRuleset(slug),
+    checkLockfileDrift(slug),
     checkVersionSync(),
     ...requiredContextsChecks(slug),
   ];

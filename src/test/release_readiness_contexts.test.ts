@@ -257,6 +257,20 @@ function writeFakeGh(dir: string, rscMain: RscBehavior, rscDev: RscBehavior): st
       conditions: { ref_name: { include: ['refs/tags/v*'] } },
     })
   );
+  // Check 3c reads both branches' lockfiles through the `contents` endpoint.
+  // Serve the SAME body on each ref so these scenarios carry no drift and keep
+  // asserting only what they are about (required-status-context handling).
+  // Without this the endpoint 404s, and 3c fails closed by design, which would
+  // turn every exit-0 expectation below into a failure for an unrelated reason.
+  const lockBody = JSON.stringify({
+    lockfileVersion: 3,
+    packages: { '': { name: 'p', version: '0.5.0' }, 'node_modules/x': { version: '1.0.0' } },
+  });
+  const contents = join(dir, 'lockfile_contents.json');
+  writeFileSync(
+    contents,
+    JSON.stringify({ encoding: 'base64', content: Buffer.from(lockBody).toString('base64') })
+  );
   const script = [
     '#!/usr/bin/env bash',
     '# Fake gh for release-readiness e2e tests: supports `gh api <path>`.',
@@ -265,6 +279,7 @@ function writeFakeGh(dir: string, rscMain: RscBehavior, rscDev: RscBehavior): st
     `  repos/*/branches/main/protection/required_status_checks) ${ghAction(dir, 'rsc_main.json', rscMain)} ;;`,
     `  repos/*/branches/dev/protection/required_status_checks) ${ghAction(dir, 'rsc_dev.json', rscDev)} ;;`,
     `  repos/*/branches/*/protection) cat "${protection}" ;;`,
+    `  repos/*/contents/package-lock.json*) cat "${contents}" ;;`,
     `  repos/*/rulesets/1) cat "${rulesetDetail}" ;;`,
     `  repos/*/rulesets) cat "${rulesets}" ;;`,
     '  *) echo "gh: Not Found (HTTP 404)" >&2; exit 1 ;;',
