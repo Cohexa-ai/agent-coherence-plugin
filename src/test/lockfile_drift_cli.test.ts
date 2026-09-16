@@ -9,25 +9,33 @@
  * suite still green, which is the same silent-control failure the check itself
  * exists to catch on the Dependabot side.
  *
- * Each case spawns the real CLI against a fake `gh` on PATH.
+ * Each case spawns the real CLI against a fake `gh` on PATH. The last case is
+ * the exception and covers the one thing spawning the CLI cannot: that the
+ * workflow invokes it at all. A guard that never runs and a guard that runs
+ * clean look identical from here.
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { load as loadYaml } from 'js-yaml';
 
 // __dirname at runtime is dist/test/; plugin root is two levels up.
 const __filename = fileURLToPath(import.meta.url);
 const PLUGIN_ROOT = resolve(dirname(__filename), '..', '..');
 const TOOL = join(PLUGIN_ROOT, 'tools', 'check_lockfile_drift.js');
+const WORKFLOW = join(PLUGIN_ROOT, '.github', 'workflows', 'lockfile-drift.yml');
 
 /** How the fake `gh` answers the two `contents` reads. */
 type LockBehavior =
   | { kind: 'perRef'; main: Record<string, string>; dev: Record<string, string> }
-  | { kind: 'http'; code: 403 | 404 };
+  | { kind: 'http'; code: 403 | 404 }
+  // No `gh` on PATH at all. Not a variant of the HTTP failures: nothing was
+  // asked and nothing answered, and the tool has a distinct message for it.
+  | { kind: 'absent' };
 
 /** A `contents` API envelope wrapping a minimal lockfile of name -> version. */
 function envelope(versions: Record<string, string>): string {
@@ -42,6 +50,9 @@ function envelope(versions: Record<string, string>): string {
 function writeFakeGh(dir: string, lock: LockBehavior): string {
   const binDir = join(dir, 'bin');
   mkdirSync(binDir, { recursive: true });
+  // An empty bin dir IS the fixture for 'absent': the caller prepends it to a
+  // PATH stripped of everything else, so the shell finds no `gh` anywhere.
+  if (lock.kind === 'absent') return binDir;
   let cases: string[];
   if (lock.kind === 'http') {
     const label = lock.code === 404 ? 'Not Found' : 'Forbidden';
@@ -81,9 +92,14 @@ function withFakeGh(
 ): void {
   const dir = mkdtempSync(join(tmpdir(), 'lockfile-drift-'));
   try {
+    const binDir = writeFakeGh(dir, lock);
+    // 'absent' must not inherit the real PATH, or the developer's own `gh`
+    // answers and the case silently tests something else. process.execPath is
+    // absolute, so node itself still starts.
+    const path = lock.kind === 'absent' ? binDir : `${binDir}:${process.env['PATH'] ?? ''}`;
     const res = spawnSync(process.execPath, [TOOL], {
       encoding: 'utf-8',
-      env: { ...process.env, PATH: `${writeFakeGh(dir, lock)}:${process.env['PATH'] ?? ''}` },
+      env: { ...process.env, PATH: path },
       timeout: 30000,
     });
     run({ status: res.status ?? -1, stdout: res.stdout ?? '', stderr: res.stderr ?? '' });
@@ -111,13 +127,18 @@ test('cli: the two refs are read distinctly and in the right order', () => {
   });
 });
 
-test('cli: a 403 warns and exits 0 — it is not evidence about the lockfiles', () => {
-  // 403 means the token cannot read contents at all. Every other read failure
-  // fails closed; this one must not, or a low-scope token turns a green run
-  // into a permanent red check that says nothing.
+test('cli: a 403 stays a WARN in the level but still exits 1', () => {
+  // The level and the exit code answer different questions. 403 is about the
+  // token, not the lockfiles, so it is not a FAIL — but it produced no
+  // comparison, and exiting 0 would paint a green check on a run that never
+  // looked at either branch. That green is indistinguishable from a real pass,
+  // which is the silent-control failure this whole check exists to prevent.
   withFakeGh({ kind: 'http', code: 403 }, (res) => {
-    assert.equal(res.status, 0, `403 must warn, not fail:\n${res.stdout}`);
+    assert.equal(res.status, 1, `a run that compared nothing must not exit 0:\n${res.stdout}`);
     assert.match(res.stdout, /check skipped \(HTTP 403/);
+    // The WARN mark is how the distinction survives into the output.
+    assert.match(res.stdout, /⚠ lockfile drift/);
+    assert.doesNotMatch(res.stdout, /✗ lockfile drift/);
   });
 });
 
@@ -128,4 +149,75 @@ test('cli: an unreadable lockfile exits 1 rather than certifying', () => {
     assert.equal(res.status, 1, `lost evidence must fail closed:\n${res.stdout}`);
     assert.match(res.stdout, /cannot prove dev is patched/);
   });
+});
+
+test('cli: no gh on PATH is reported as a missing binary, not as a branch problem', () => {
+  // The CLI's only dependency is `gh`, and the operator who hits this needs to
+  // install it — not go looking at dev. The classification is easy to get wrong:
+  // execSync runs through a shell, so a missing binary arrives as exit 127 with
+  // `command not found`, never as the ENOENT an argv-form spawn would raise.
+  withFakeGh({ kind: 'absent' }, (res) => {
+    assert.equal(res.status, 1, `a missing gh must fail closed:\n${res.stdout}\n${res.stderr}`);
+    assert.match(res.stdout, /gh CLI not found on PATH/);
+  });
+});
+
+test('cli: only a proven drift may tell the operator dev is missing an update', () => {
+  // The closing line is the part an operator acts on, and the three non-pass
+  // outcomes justify different actions. Asserting the discrimination in both
+  // directions is the point: a single shared line would pass any one of these
+  // cases alone while sending two of the three operators to the wrong place.
+  const MISSING_UPDATES = /dev is missing dependency updates/;
+  const NOT_ABOUT_DEV = /NOT a statement about dev/;
+
+  withFakeGh({ kind: 'perRef', main: { 'js-yaml': '4.3.2' }, dev: { 'js-yaml': '4.3.1' } }, (res) => {
+    assert.match(res.stdout, MISSING_UPDATES);
+    assert.doesNotMatch(res.stdout, NOT_ABOUT_DEV);
+  });
+
+  // 404 and 403 both compared nothing, so neither may make a claim about dev.
+  for (const code of [404, 403] as const) {
+    withFakeGh({ kind: 'http', code }, (res) => {
+      assert.doesNotMatch(res.stdout, MISSING_UPDATES, `HTTP ${code} must not claim drift`);
+      assert.match(res.stdout, NOT_ABOUT_DEV);
+    });
+  }
+
+  withFakeGh({ kind: 'absent' }, (res) => {
+    assert.doesNotMatch(res.stdout, MISSING_UPDATES);
+    assert.match(res.stdout, NOT_ABOUT_DEV);
+  });
+
+  // And a clean run says none of it.
+  withFakeGh({ kind: 'perRef', main: { 'js-yaml': '4.3.2' }, dev: { 'js-yaml': '4.3.2' } }, (res) => {
+    assert.equal(res.status, 0);
+    assert.doesNotMatch(res.stdout, MISSING_UPDATES);
+    assert.doesNotMatch(res.stdout, NOT_ABOUT_DEV);
+  });
+});
+
+test('workflow: the guard is wired to run, and to run this tool', () => {
+  // Everything above tests a CLI the suite invokes itself. None of it says the
+  // workflow ever invokes it — and a guard that never runs is indistinguishable
+  // from a guard that runs clean. These are the four properties that decide
+  // whether this file is live, each one a way it has silently gone inert.
+  const wf = loadYaml(readFileSync(WORKFLOW, 'utf8')) as {
+    on: { push: { branches: string[] } };
+    jobs: Record<string, { steps: { uses?: string; run?: string }[] }>;
+  };
+
+  // A push-triggered workflow runs the definition on the ref that was pushed.
+  // `dev` is load-bearing, not symmetry: this change merges to dev, so a
+  // main-only trigger would leave the guard inert until the next release.
+  assert.deepEqual([...wf.on.push.branches].sort(), ['dev', 'main']);
+
+  const steps = Object.values(wf.jobs).flatMap((job) => job.steps);
+  const runs = steps.map((s) => s.run ?? '').join('\n');
+  assert.match(runs, /node tools\/check_lockfile_drift\.js/);
+
+  // A mutable action tag on the step that fetches the code a security check
+  // then reads is the one substitution in this file that would go unnoticed.
+  for (const uses of steps.map((s) => s.uses).filter(Boolean) as string[]) {
+    assert.match(uses, /@[0-9a-f]{40}$/, `${uses} must be pinned to a full SHA`);
+  }
 });

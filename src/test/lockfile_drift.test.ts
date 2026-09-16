@@ -1,9 +1,11 @@
 /**
  * Lockfile-drift verdict tests — `evaluateLockfileDrift`, the pure comparison
- * behind `tools/check_lockfile_drift.js`. The function lives in
- * tools/check_release_readiness.js beside its sibling verdicts and is exported
- * from there; it is deliberately NOT one of that file's release-readiness
- * checks (a release tag points at `main`, so `dev`'s state cannot gate it).
+ * behind `tools/check_lockfile_drift.js`. It lives in tools/lockfile_drift.js,
+ * which imports nothing: the gh-fetching wrapper in
+ * tools/check_release_readiness.js depends on the comparison, not the other way
+ * round, so these tests do not load the release preflight to exercise a
+ * function that is deliberately NOT one of its checks (a release tag points at
+ * `main`, so `dev`'s state cannot gate it).
  *
  * Origin: Dependabot builds its dependency graph from the DEFAULT branch
  * only. `.github/dependabot.yml` says so in its own comment, and the repo is
@@ -38,9 +40,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 // @ts-expect-error — plain JS tool, no type declarations by design.
-import { evaluateLockfileDrift } from '../../tools/check_release_readiness.js';
+import { evaluateLockfileDrift } from '../../tools/lockfile_drift.js';
 
-type Verdict = { ok: boolean; detail: string };
+type Verdict = { ok: boolean; reason: string; detail: string };
 
 /** Minimal package-lock.json shape: only `packages{}` matters to the guard. */
 function lock(pkgs: Record<string, string>): Record<string, unknown> {
@@ -326,4 +328,80 @@ test('lockfile drift: a top-level verdict still prescribes the forward-merge', (
   );
   assert.equal(v.ok, false);
   assert.match(v.detail, /forward-merge/);
+});
+
+test('lockfile drift: a same-major duplicate on MAIN does not certify a dev sitting at the older one', () => {
+  // The inversion that a lowest-only collapse cannot see, and the reason each
+  // lineage now tracks both ends. main carries the patched 4.3.2 at top level
+  // and still drags a 4.3.1 copy under a dependency — an ordinary npm tree, and
+  // the literal shape of a half-landed dependabot bump. Collapsing main to its
+  // LOWEST makes main read as 4.3.1, dev's 4.3.1 compares equal, and the guard
+  // certifies in writing the exact branch state the alert was raised about.
+  const v: Verdict = evaluateLockfileDrift(
+    rawLock({
+      'node_modules/js-yaml': { version: '4.3.2' },
+      'node_modules/some-dep/node_modules/js-yaml': { version: '4.3.1' },
+    }),
+    rawLock({ 'node_modules/js-yaml': { version: '4.3.1' } })
+  );
+  assert.equal(v.ok, false);
+  assert.match(v.detail, /js-yaml/);
+  assert.match(v.detail, /4\.3\.1/);
+  assert.match(v.detail, /4\.3\.2/);
+});
+
+test('lockfile drift: an unorderable version never claims a lineage slot and masks a real drift', () => {
+  // Why the PLAIN_VERSION filter sits at ingest rather than at comparison time,
+  // stated as a failing shape. dev's prerelease is written FIRST, so a collapse
+  // that admitted it would seat it as both ends of the lineage — and it could
+  // never be dethroned, because comparePlainVersions returns null against it
+  // rather than -1 or 1. Both of dev's ends would then compare null against
+  // main and the 1.0.0 copy dev actually installs would go unreported.
+  const v: Verdict = evaluateLockfileDrift(
+    rawLock({ 'node_modules/p': { version: '1.5.0' } }),
+    rawLock({
+      'node_modules/dep/node_modules/p': { version: '1.9.0-rc.1' },
+      'node_modules/p': { version: '1.0.0' },
+    })
+  );
+  assert.equal(v.ok, false);
+  assert.match(v.detail, /1\.0\.0/);
+});
+
+test('lockfile drift: a malformed root entry fails closed, same as a missing one', () => {
+  // `usablePackages` checks the root entry's VALUE, not just its key. npm always
+  // writes `""` as an object carrying a version, so each of these is a body that
+  // is not a lockfile — and each one, admitted, compares nothing against nothing
+  // and reaches the certifying PASS text.
+  for (const root of [null, undefined, {}, [], 'p@0.5.0', { name: 'p' }]) {
+    const v: Verdict = evaluateLockfileDrift(rawLock({ 'node_modules/x': { version: '2.0.0' } }), {
+      lockfileVersion: 3,
+      packages: { '': root },
+    });
+    assert.equal(v.ok, false, `root ${JSON.stringify(root)} must not certify`);
+    assert.match(v.detail, /cannot prove dev is patched/);
+  }
+});
+
+test('lockfile drift: the verdict carries a reason the CLI can discriminate on', () => {
+  // "dev is behind" and "the check could not read its evidence" are both ok:false
+  // and mean opposite things to an operator. The CLI branches its closing line on
+  // this field, so only `drift` may ever assert that dev is missing an update.
+  const clean: Verdict = evaluateLockfileDrift(
+    rawLock({ 'node_modules/p': { version: '1.0.0' } }),
+    rawLock({ 'node_modules/p': { version: '1.0.0' } })
+  );
+  assert.equal(clean.reason, 'clean');
+
+  const drift: Verdict = evaluateLockfileDrift(
+    rawLock({ 'node_modules/p': { version: '2.0.0' } }),
+    rawLock({ 'node_modules/p': { version: '1.0.0' } })
+  );
+  assert.equal(drift.reason, 'drift');
+
+  const unreadable: Verdict = evaluateLockfileDrift(
+    rawLock({ 'node_modules/p': { version: '2.0.0' } }),
+    { lockfileVersion: 3, packages: {} }
+  );
+  assert.equal(unreadable.reason, 'unreadable');
 });
