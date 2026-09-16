@@ -988,8 +988,15 @@ export class ArtifactRegistry {
   }> {
     const rows = this.db
       .prepare(
+        // Newest-first. Every capped renderer sorts by this key before
+        // slicing, and Python's `pop_pending_notices` pins the identical
+        // order; without it the SELECT returns `artifact_id` ASCII order,
+        // which is random-UUID order and uncorrelated with preemption time.
+        // Harmless only while callers drain the whole queue -- a bounded
+        // consume would delete a different set than it rendered.
         `SELECT artifact_id, preempter_agent_id, preempted_at_unix_ts
-           FROM pending_notices WHERE agent_id = ?`,
+           FROM pending_notices WHERE agent_id = ?
+           ORDER BY preempted_at_unix_ts DESC, artifact_id DESC`,
       )
       .all(agentId) as {
       artifact_id: string;

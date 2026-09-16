@@ -30,6 +30,7 @@ import {
   SESSION_START_STALE_LINE_TEMPLATE,
   SESSION_START_TOUCHED_LINE_TEMPLATE,
   SESSION_START_OVERFLOW_LINE_TEMPLATE,
+  SESSION_START_NOTICE_OVERFLOW_LINE_TEMPLATE,
   SESSION_START_SUBAGENT_PREFIX_TEMPLATE,
   SESSION_START_CLOSING_LINE,
   emitSessionStart,
@@ -92,6 +93,15 @@ function sessionStartText(body: Record<string, unknown>): string {
 }
 
 // ------------------------------------------------------------ byte parity
+
+test("session-start: the notice overflow line names no surface that lacks notice data", () => {
+  // Python dropped the /status pointer from its own notice overflow line in
+  // c05fbd9 for exactly this reason. Node's GET /status carries no notice
+  // field at any tier, so naming it here would be a promise it cannot keep.
+  assert.doesNotMatch(SESSION_START_NOTICE_OVERFLOW_LINE_TEMPLATE, /agent-coherence-status/);
+  assert.doesNotMatch(SESSION_START_NOTICE_OVERFLOW_LINE_TEMPLATE, /GET \/status/);
+  assert.match(SESSION_START_NOTICE_OVERFLOW_LINE_TEMPLATE, /still queued/);
+});
 
 test("session-start: the seven prose constants byte-match the Python source (KTD8)", () => {
   assert.equal(SESSION_START_HEADER, "Post-compaction re-grounding (agent-coherence):");
@@ -559,9 +569,17 @@ test("session-start: the flattened notice block honours the verbatim cap (R5 siz
     const text = sessionStartText(r.body);
     // Exactly three notice bullets survive verbatim...
     assert.equal(text.split("\n").filter((l) => l.startsWith("  • ")).length, 3);
-    // ...and BOTH blocks (notices, artifact lines) coalesce the remaining 37.
-    const overflow = "Plus 37 more — run agent-coherence-status for the full picture.";
-    assert.equal(text.split("\n").filter((l) => l === overflow).length, 2);
+    // The ARTIFACT block coalesces its remaining 37 and points at the status
+    // surface, which does carry tracked-artifact paths and versions.
+    const artifactOverflow = "Plus 37 more — run agent-coherence-status for the full picture.";
+    assert.equal(text.split("\n").filter((l) => l === artifactOverflow).length, 1);
+    // The NOTICE block coalesces its own 37 and must NOT point there: no
+    // /status tier carries notice data, so that pointer promises a surface
+    // that cannot answer. Session-start PEEKS, so the rows really are queued.
+    const noticeOverflow =
+      "Plus 37 more preemptions since your last activity, still queued — " +
+      "they surface on your next tracked-file operation.";
+    assert.equal(text.split("\n").filter((l) => l === noticeOverflow).length, 1);
     assert.ok(Buffer.byteLength(text, "utf8") < 10_000);
     // The intro reports the TRUE pending count, never the post-cap bullet
     // count: "3 of your grants were revoked" when 40 were is a wrong number

@@ -39,6 +39,7 @@ import {
   SESSION_START_STALE_LINE_TEMPLATE,
   SESSION_START_TOUCHED_LINE_TEMPLATE,
   SESSION_START_OVERFLOW_LINE_TEMPLATE,
+  SESSION_START_NOTICE_OVERFLOW_LINE_TEMPLATE,
   SESSION_START_SUBAGENT_PREFIX_TEMPLATE,
   SESSION_START_CLOSING_LINE,
 } from "../hook_payloads.js";
@@ -233,7 +234,7 @@ export function buildSessionStartContext(
     const noticeOverflow = notices.length - verbatimNotices.length;
     if (noticeOverflow > 0) {
       noticeText +=
-        "\n" + fmt(SESSION_START_OVERFLOW_LINE_TEMPLATE, { count: String(noticeOverflow) });
+        "\n" + fmt(SESSION_START_NOTICE_OVERFLOW_LINE_TEMPLATE, { count: String(noticeOverflow) });
     }
   }
 
