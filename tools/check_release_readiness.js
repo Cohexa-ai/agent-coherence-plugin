@@ -67,9 +67,12 @@
  * workflow parser below, not a YAML library.
  *
  * No package.json script alias is added by this file — invoke directly.
- * Also importable — collectWorkflowContexts / compareContextsToJobs feed the
- * compiled test suite (dist/test/release_readiness_contexts.test.js);
- * importing never runs the CLI entry point.
+ * Also importable, and importing never runs the CLI entry point:
+ * collectWorkflowContexts / compareContextsToJobs feed the compiled test suite
+ * (dist/test/release_readiness_contexts.test.js), and resolveRepoSlug /
+ * checkLockfileDrift feed tools/check_lockfile_drift.js. The lockfile-drift
+ * comparison itself lives in tools/lockfile_drift.js; only its gh-fetching
+ * wrapper is here, and it is NOT one of the seven checks above.
  */
 
 import { execSync } from 'node:child_process';
@@ -77,6 +80,7 @@ import { readFileSync, realpathSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { dirname, resolve } from 'node:path';
 import { evaluateVersionSync } from './check_versions_synced.js';
+import { evaluateLockfileDrift } from './lockfile_drift.js';
 
 const FALLBACK_SLUG = 'Cohexa-ai/agent-coherence-plugin';
 const TAG_PATTERN = 'v*';
@@ -100,7 +104,7 @@ function parseRepoSlug(url) {
   return `${match[1]}/${match[2]}`;
 }
 
-function resolveRepoSlug() {
+export function resolveRepoSlug() {
   try {
     const here = dirname(fileURLToPath(import.meta.url));
     const pkgPath = resolve(here, '..', 'package.json');
@@ -135,13 +139,43 @@ function ghApi(path) {
     const stdout = execSync(`gh api ${path}`, {
       encoding: 'utf8',
       stdio: ['pipe', 'pipe', 'pipe'],
+      // Node defaults to 1 MiB and reports an overrun as ENOBUFS with an empty
+      // stderr, which lands in the generic 'other' bucket below — a silent
+      // truncation dressed as an API error. The `contents` endpoint base64s
+      // its payload into a JSON envelope (~1.33x), so package-lock.json alone
+      // would hit the default somewhere around 790 KB.
+      maxBuffer: 64 * 1024 * 1024,
+      // Without this a stalled connection blocks forever, and neither the
+      // release preflight nor the drift job sets `timeout-minutes`, so the
+      // ceiling is the Actions 360-minute default. A timed-out call throws with
+      // no stderr match and lands in the generic 'other' bucket, which every
+      // caller already treats as a hard failure — so this converts an
+      // indefinite hang into a fast, correctly-classified one.
+      timeout: 30_000,
     });
     return { ok: true, stdout, stderr: '' };
   } catch (err) {
     const stderr = (err.stderr ?? '').toString();
     const stdout = (err.stdout ?? '').toString();
-    // ENOENT → gh CLI not on PATH.
-    if (err.code === 'ENOENT') {
+    // gh CLI not on PATH. ENOENT is the direct-spawn spelling and is currently
+    // unreachable: execSync runs `/bin/sh -c`, so a missing `gh` is the SHELL
+    // exiting 127, and ENOENT would mean /bin/sh itself is gone. Both spellings
+    // are matched rather than swapping one for the other, because the ENOENT
+    // branch becomes live again the moment this helper moves to an argv-form
+    // spawn. Without the 127 test a missing `gh` falls into 'other' and every
+    // caller reports it as a failed API read — fail-closed, so not a wrong
+    // verdict, but it sends an operator looking at branch state for a problem
+    // that is a missing binary.
+    //
+    // Keyed on the exit code and NOT on the message, because the message is the
+    // shell's and every shell words it differently — measured, not assumed:
+    // dash (Ubuntu's /bin/sh, so every CI runner) writes `gh: not found`, while
+    // macOS /bin/sh and bash write `gh: command not found`. All three exit 127,
+    // which is the POSIX code for it. A stderr test for `command not found`
+    // passes locally and silently stops classifying on every runner. No `gh`
+    // subcommand exits 127 itself, and one that did would land here as a FAIL
+    // either way — only the message would be less precise.
+    if (err.code === 'ENOENT' || err.status === 127) {
       return { ok: false, status: 'gh_missing', stdout, stderr };
     }
     if (/HTTP 404/i.test(stderr)) {
@@ -482,6 +516,64 @@ function checkBranchRuleset(slug) {
     return result(name, WARN, verdicts.map((v) => v.detail).join('; '));
   }
   return result(name, PASS, verdicts.map((v) => v.detail).join('; '));
+}
+
+// -----------------------------------------------------------------------------
+// Lockfile drift (NOT one of the numbered release checks above)
+// -----------------------------------------------------------------------------
+//
+// The pure comparison lives in tools/lockfile_drift.js; only the gh-fetching
+// wrapper is here, because that is where ghApi lives. Deliberately absent from
+// main()'s results array: a release tag points at main, and dev's state says
+// nothing about whether the artifact being tagged is correct, so gating the tag
+// on it would block a good release for a condition about a branch that is not
+// shipping. tools/check_lockfile_drift.js is the caller.
+//
+// This is the one check that returns a `reason` alongside the shared
+// {name, level, detail} shape. A level alone cannot tell an operator whether
+// dev is behind or whether the check never got to look: both are FAIL, and only
+// the first justifies telling them to forward-merge. main()'s renderer ignores
+// unknown keys, so the extra field costs the other checks nothing.
+
+export function checkLockfileDrift(slug) {
+  const name = 'lockfile drift (dev vs main)';
+  const verdict = (level, reason, detail) => ({ ...result(name, level, detail), reason });
+
+  const fetchLock = (ref) => {
+    const res = ghApi(`repos/${slug}/contents/package-lock.json?ref=${ref}`);
+    if (!res.ok) return { ok: false, status: res.status };
+    try {
+      const body = JSON.parse(res.stdout);
+      const raw =
+        body.encoding === 'base64'
+          ? Buffer.from(body.content ?? '', 'base64').toString('utf8')
+          : (body.content ?? '');
+      return { ok: true, lock: JSON.parse(raw) };
+    } catch {
+      return { ok: false, status: 'unparseable' };
+    }
+  };
+
+  const fetched = { main: fetchLock('main'), dev: fetchLock('dev') };
+  for (const [ref, res] of Object.entries(fetched)) {
+    if (res.ok) continue;
+    if (res.status === 'gh_missing') {
+      return verdict(FAIL, 'unreadable', 'gh CLI not found on PATH');
+    }
+    // 403 is the one status that is about the caller's credentials rather than
+    // the lockfiles, so it stays WARN. It is still not a pass: see the CLI.
+    if (res.status === 'http_403') {
+      return verdict(WARN, 'skipped', `check skipped (HTTP 403 reading ${ref}). Verify locally.`);
+    }
+    return verdict(
+      FAIL,
+      'unreadable',
+      `could not read package-lock.json on ${ref} (${res.status}) — cannot prove dev is patched`
+    );
+  }
+
+  const drift = evaluateLockfileDrift(fetched.main.lock, fetched.dev.lock);
+  return verdict(drift.ok ? PASS : FAIL, drift.reason, drift.detail);
 }
 
 // -----------------------------------------------------------------------------

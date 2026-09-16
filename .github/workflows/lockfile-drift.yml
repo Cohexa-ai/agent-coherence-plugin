@@ -1,0 +1,100 @@
+# Report when `dev`'s lockfile falls behind `main`'s.
+#
+# Dependabot builds its dependency graph from the DEFAULT branch only, so a
+# security advisory raises one alert and one PR, both scoped to `main`, and
+# `dev` is never examined — even though every feature branch is cut from it.
+# The alert then closes on the `main` merge while `dev` is still running the
+# vulnerable version. That has happened twice on js-yaml: alert #5 closed four
+# seconds after PR #102 merged and forty-one minutes before `dev` was patched;
+# alert #6 closed five seconds after PR #128 merged.
+#
+# Triggering on push to `main` catches the drift at the moment it is created —
+# a dependabot bump landing on the default branch — rather than at release
+# time, where the remedy would cost a spent version number.
+#
+# `dev` is in the trigger list for two reasons. A push-triggered workflow runs
+# the definition on the ref that was pushed, so a file that only ever fires on
+# `main` stays inert until it reaches `main` — which, for a change merged to
+# `dev`, means the next release. Listing `dev` makes the guard live the moment
+# this merges, on the branch it is about. And a push to `dev` is itself a
+# legitimate moment to ask the question: a forward-merge that was supposed to
+# clear the drift is a push to `dev`, and this is what proves it worked.
+#
+# WHY A SCHEDULE, AND WHY IT IS NOT BELT-AND-BRACES. The push triggers above
+# cannot see most of what lands on `main`, and no amount of branch-listing fixes
+# it: a push made with `GITHUB_TOKEN` does not create a workflow run, because
+# GitHub suppresses it to stop workflows triggering themselves.
+# `dependabot-automerge.yml` merges with exactly that token, so every bump it
+# lands is invisible to every workflow in this repo. Measured on `main`:
+#
+#   2026-08-23   6 commits ->  6 ci.yml push runs   (merged by a human)
+#   2026-08-25   7 commits ->  7 ci.yml push runs   (merged by a human)
+#   2026-08-31   4 commits ->  0 ci.yml push runs   (auto-merged)
+#   2026-09-07   4 commits ->  0 ci.yml push runs   (auto-merged)
+#   2026-09-14   4 commits ->  0 ci.yml push runs   (auto-merged)
+#   2026-09-16   1 commit  ->  1 ci.yml push run    (merged by a human, PR #128)
+#
+# Twelve of thirteen pushes fired nothing. The guard's own purpose survives that
+# only by luck of configuration: `dependabot-automerge.yml` excludes production
+# dependencies and majors, so a security advisory always waits for a human, and
+# a human merge does fire — PR #128 above is alert #6. The schedule is what
+# makes the guard independent of that luck. A cron run is not a push, so no
+# suppression rule applies to it, and because the comparison reads the two
+# branch TIPS rather than a pushed commit, one daily run reports every drift
+# accumulated since the last one regardless of who merged what.
+#
+# The schedule only runs from the DEFAULT branch, so like the `main` push
+# trigger it stays dormant until this file reaches `main`, and arms itself
+# there with no further action. 13:00 UTC is just after dependabot's Monday
+# ~12:16 UTC batch, which bounds detection to under an hour on the day drift is
+# most likely and to 24h every other day.
+#
+# This job blocks nothing: it is a visible red check on the commit it examined.
+name: lockfile-drift
+
+on:
+  push:
+    branches: [main, dev]
+  schedule:
+    - cron: '0 13 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# The comparison always reads the tips of `main` and `dev`, never the pushed
+# commit, so a queued older run can only re-answer a question the newer run is
+# already answering with fresher inputs.
+#
+# The group is deliberately global rather than per-ref or per-event: every run
+# of this workflow asks the identical question, so two concurrent runs are pure
+# duplication whichever trigger started them. The cost, now that a schedule can
+# collide with a push, is that the cancelled run leaves "cancelled" on its
+# commit instead of a verdict. That is acceptable because the surviving run
+# answers for both — it reads the same two tips — and unacceptable only if a
+# verdict were per-commit, which this one is not.
+concurrency:
+  group: lockfile-drift
+  cancel-in-progress: true
+
+jobs:
+  drift:
+    name: dev lockfile is not behind main
+    runs-on: ubuntu-latest
+    # Two `gh api` calls against a 68 KB file each. Anything approaching this
+    # is hung, not slow, and the default six hours would hold a runner for it.
+    timeout-minutes: 5
+    steps:
+      # Pinned to the same SHA as ci.yml: a mutable tag on the action that
+      # fetches the code a security check then reads is the one place in this
+      # file where a supply-chain substitution would go unnoticed.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      # The check shells out to `gh api` for both branches' package-lock.json
+      # and needs no dependencies of its own, so there is no setup-node or
+      # npm ci step: the runner's Node is enough and `tools/*.js` imports only
+      # Node builtins by design.
+      - name: Check dev against main
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: node tools/check_lockfile_drift.js
