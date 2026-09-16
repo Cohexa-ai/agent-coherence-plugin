@@ -37,6 +37,18 @@ const SID_B = "55555555-5555-5555-8555-555555555555";
 const HASH_1 = "1".repeat(64);
 const HASH_2 = "2".repeat(64);
 
+/**
+ * The `<unknown>` sentinel with its closing bracket dropped — what a bare
+ * `slice(0, 8)` makes of it, and the exact malformed text every sentinel test
+ * here exists to keep out of model-visible prose.
+ *
+ * Excluding `-` as well as `>` is load-bearing: `<unknown-artifact>` is the
+ * artifact-path fallback in all four notice builders (pre_bash, pre_read,
+ * pre_edit, session_start) and legitimately reaches the same prose, so a
+ * lookahead of `(?!>)` alone would fail a notice that truncated nothing.
+ */
+const TRUNCATED_SENTINEL = /<unknown(?![->])/;
+
 // ------------------------------------------------------------ byte parity
 
 test("pythonIsoUtc: +00:00 offset, 6-digit microseconds, zero-fraction omits them", () => {
@@ -83,7 +95,7 @@ test("emitStrictDeny: <unknown> sentinel preserved verbatim (never sliced to '<u
   };
   const out = emitStrictDeny({ source: "pre_read_strict_deny", summary });
   assert.match(out.permissionDecisionReason!, /by session <unknown> at 2025-05-24T12:00:00\+00:00\./);
-  assert.doesNotMatch(out.permissionDecisionReason!, /<unknow[^n]/);
+  assert.doesNotMatch(out.permissionDecisionReason!, TRUNCATED_SENTINEL);
 });
 
 test("staleReadWarning: <unknown> sentinel preserved verbatim (never sliced)", () => {
@@ -98,13 +110,13 @@ test("staleReadWarning: <unknown> sentinel preserved verbatim (never sliced)", (
   };
   const text = staleReadWarning(summary);
   assert.match(text, /session <unknown> at/);
-  assert.doesNotMatch(text, /<unknow[^n]/);
+  assert.doesNotMatch(text, TRUNCATED_SENTINEL);
 });
 
 test("editCollisionWarning: <unknown> sentinel preserved verbatim (never sliced)", () => {
   const text = editCollisionWarning("<unknown>", 1748088000, "plan.md");
   assert.match(text, /\(<unknown>\)/);
-  assert.doesNotMatch(text, /<unknow[^n]/);
+  assert.doesNotMatch(text, TRUNCATED_SENTINEL);
 });
 
 test("warn renderers still shorten a REAL session id to 8 chars", () => {
@@ -145,13 +157,19 @@ test("drainNoticeText: an unresolved preempter keeps its <unknown> sentinel", ()
   const text = drainNoticeText(deps, "victim");
   assert.ok(text);
   assert.match(text, /session <unknown> at/);
-  assert.doesNotMatch(text, /<unknow[^n]/);
+  assert.doesNotMatch(text, TRUNCATED_SENTINEL);
 });
 
 test("shortSessionId is the single shortener: sentinel whole, real id to 8", () => {
   assert.equal(shortSessionId("<unknown>"), "<unknown>");
   assert.equal(shortSessionId("<unknown-artifact>"), "<unknown-artifact>");
   assert.equal(shortSessionId("f2f7eab3-1111-4111-8111-111111111111"), "f2f7eab3");
+  // Each case above satisfies BOTH halves of `startsWith("<") && endsWith(">")`
+  // or neither, so either half could be deleted and they would all still pass.
+  // These two are the only inputs that tell the halves apart, and they must be
+  // longer than 8 chars or the slice is a no-op and proves nothing.
+  assert.equal(shortSessionId("<unclosed-sentinel"), "<unclose");
+  assert.equal(shortSessionId("no-open-bracket>"), "no-open-");
 });
 
 test("template placeholder set is locked (KTD-P)", () => {

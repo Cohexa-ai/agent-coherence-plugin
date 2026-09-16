@@ -168,17 +168,6 @@ export function emitAllow(args: {
 }
 
 /**
- * Build the strict-mode deny envelope — byte-parity with Python
- * `emit_strict_deny`:
- * - null/absent last_writer → the literal `<unknown>`;
- * - a `<…>` sentinel is preserved VERBATIM (a naive [:8] slice would emit
- *   `<unknown` — the plan-review finding);
- * - otherwise the 8-char short form;
- * - timestamp via `pythonIsoUtc` (never toISOString);
- * - NO additionalContext key.
- * The `source` arg is kept for call-site telemetry parity with Python.
- */
-/**
  * The 8-char short form of a session id, EXCEPT for a `<...>` sentinel.
  *
  * A placeholder like `"<unknown>"` is prose, not an identifier: slicing it to
@@ -193,6 +182,17 @@ export function shortSessionId(sessionId: string): string {
   return sessionId.startsWith("<") && sessionId.endsWith(">") ? sessionId : sessionId.slice(0, 8);
 }
 
+/**
+ * Build the strict-mode deny envelope — byte-parity with Python
+ * `emit_strict_deny`:
+ * - null/absent last_writer → the literal `<unknown>`;
+ * - a `<…>` sentinel is preserved VERBATIM (a naive [:8] slice would emit
+ *   `<unknown` — the plan-review finding);
+ * - otherwise the 8-char short form;
+ * - timestamp via `pythonIsoUtc` (never toISOString);
+ * - NO additionalContext key.
+ * The `source` arg is kept for call-site telemetry parity with Python.
+ */
 export function emitStrictDeny(args: { source: string; summary: StaleSummary }): HookSpecificOutput {
   const lastWriterFull = args.summary.last_writer_session_id || "<unknown>";
   const lastWriterShort = shortSessionId(lastWriterFull);
