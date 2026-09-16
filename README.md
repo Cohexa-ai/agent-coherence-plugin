@@ -131,7 +131,7 @@ command -v agent-coherence-hook-client
 mkdir -p .coherence && printf 'node\n' > .coherence/coordinator_backend
 ```
 
-See [§ Coordinator backends](#architecture) for the selection rules and the one remaining Python-only helper (`agent-coherence-migrate-deny`). Both backends speak the same wire contract at byte-parity.
+See [§ Coordinator backends](#architecture) for the selection rules and the one remaining Python-only helper (`agent-coherence-migrate-deny`). Both backends speak the same **hook** wire contract — the decision envelope every hook returns is pinned byte-for-byte against Python by the library's `protocol_corpus` fixtures. The diagnostic endpoints (`GET /status`, `GET /health`) and preemption-notice prose are **not** converged; see [§ Known limitations](#known-limitations).
 
 After install, restart any running `claude` sessions in your workspace so the new `SessionStart` hook fires.
 
@@ -226,7 +226,7 @@ Two processes:
 Two coordinator backends:
 
 - **Python** — canonical, richest feature set. Ships in the `agent-coherence` library on PyPI.
-- **Node** — self-sufficient (needs **no Python**): all six hooks, the track/untrack/status CLIs, and strict mode, all at wire-parity with Python. Ships as `src/` in this plugin and is built into the plugin data dir at first-session provisioning (a built dev checkout's `dist/` is used as-is).
+- **Node** — self-sufficient (needs **no Python**): all six hooks, the track/untrack/status CLIs, and strict mode. The six hooks' decision envelopes are at wire-parity with Python and pinned by the `protocol_corpus` fixtures; the `status` CLI reads `GET /status`, whose envelope is **not** converged between the backends, and is not corpus-pinned. Ships as `src/` in this plugin and is built into the plugin data dir at first-session provisioning (a built dev checkout's `dist/` is used as-is).
 
 **Selecting the backend.** The default is **`node` for a fresh workspace** and **`python` for an established one** — resolved at `SessionStart` as: `COHERENCE_COORDINATOR_BACKEND` env → `<repo>/.coherence/coordinator_backend` file → guarded default. The default is guarded two ways, and both apply **only** when you haven't chosen explicitly:
 
@@ -331,6 +331,7 @@ The plugin-shipped path requires a Claude Code platform change — tracked in [a
 | Compaction re-grounding: one residual duplicate | A mid-loop deferred delivery is later followed by the platform re-rendering the compaction attachment at the next user turn; the two sightings can differ if state moved between them | The staler rendering is the later one — the payload's closing line ("a more recent read supersedes this notice") and event-anchored wording make the duplicate benign. |
 | Compaction re-grounding: first compaction after upgrade can't flag staleness | The last-observed comparand starts NULL for rows recorded before the upgrade, and never-observed rows are deliberately never flagged | Staleness detection becomes accurate as sessions read/commit after the upgrade. Not a bug — the alternative (flagging never-observed rows) would false-alarm on every untouched artifact. |
 | Compaction re-grounding: fail-open loss on a cold coordinator | If the coordinator is down or still starting at the compact boundary, the SessionStart hook emits `{}` and that compaction's re-grounding is lost on both paths | Rare mid-session (the coordinator is warm); matches the plugin's universal fail-open contract — coordination never blocks the session. |
+| Cross-backend parity is the hook envelope, not every surface | `protocol_corpus` runs 24 of its 31 fixtures against both backends and pins the seven POST hook surfaces — the decision envelope (`permissionDecision`, `permissionDecisionReason`, `status`) and the SessionStart re-grounding prose. Three surfaces sit outside it: `GET /status` and `GET /health` have **no** cross-backend fixture and differ by design (`/health` is Node-only), and preemption-notice prose shares no byte-identical line between the two renderers | Read `/status` as backend-specific — parse it defensively and do not port a consumer between backends without re-checking. Notice prose is model-facing context, not a machine contract, so the divergence is cosmetic there. Tracked in [#138](https://github.com/Cohexa-ai/agent-coherence-plugin/issues/138). |
 
 ### Resolved in v0.2–v0.3
 
