@@ -17,7 +17,15 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -154,12 +162,41 @@ test('cli: an unreadable lockfile exits 1 rather than certifying', () => {
 test('cli: no gh on PATH is reported as a missing binary, not as a branch problem', () => {
   // The CLI's only dependency is `gh`, and the operator who hits this needs to
   // install it — not go looking at dev. The classification is easy to get wrong:
-  // execSync runs through a shell, so a missing binary arrives as exit 127 with
-  // `command not found`, never as the ENOENT an argv-form spawn would raise.
+  // execSync runs through a shell, so a missing binary arrives as the SHELL
+  // exiting 127, never as the ENOENT an argv-form spawn would raise.
+  //
+  // This case can only ever exercise the host's own /bin/sh. The next test
+  // covers what it therefore cannot.
   withFakeGh({ kind: 'absent' }, (res) => {
     assert.equal(res.status, 1, `a missing gh must fail closed:\n${res.stdout}\n${res.stderr}`);
     assert.match(res.stdout, /gh CLI not found on PATH/);
   });
+});
+
+test('every POSIX shell reports a missing command as exit 127, whatever it calls it', () => {
+  // The portability fact the classification above rests on, pinned where it can
+  // break. A first attempt keyed on the stderr text instead and passed on macOS
+  // while failing on all six CI legs: Ubuntu's /bin/sh is dash, which writes
+  // `gh: not found`, where macOS /bin/sh and bash write `gh: command not
+  // found`. The exit code is the only part all of them agree on.
+  //
+  // Node picks the shell for execSync, so no CLI-level test can reach a shell
+  // other than the host's. Asserting the invariant directly is what makes the
+  // difference visible on a developer machine rather than on a runner.
+  const dir = mkdtempSync(join(tmpdir(), 'lockfile-drift-shell-'));
+  try {
+    const shells = ['/bin/sh', '/bin/bash', '/bin/dash'].filter((s) => existsSync(s));
+    assert.ok(shells.length > 0, 'no POSIX shell found to test against');
+    for (const shell of shells) {
+      const res = spawnSync(shell, ['-c', 'definitely-not-a-real-binary api x'], {
+        encoding: 'utf-8',
+        env: { ...process.env, PATH: dir },
+      });
+      assert.equal(res.status, 127, `${shell} must exit 127: got ${res.status} / ${res.stderr}`);
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test('cli: only a proven drift may tell the operator dev is missing an update', () => {

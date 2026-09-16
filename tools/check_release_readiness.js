@@ -159,14 +159,23 @@ function ghApi(path) {
     const stdout = (err.stdout ?? '').toString();
     // gh CLI not on PATH. ENOENT is the direct-spawn spelling and is currently
     // unreachable: execSync runs `/bin/sh -c`, so a missing `gh` is the SHELL
-    // exiting 127 with `command not found`, and ENOENT would mean /bin/sh
-    // itself is gone. Both spellings are matched rather than swapping one for
-    // the other, because the ENOENT branch becomes live again the moment this
-    // helper moves to an argv-form spawn. Without the 127 test a missing `gh`
-    // falls into 'other' and every caller reports it as a failed API read —
-    // fail-closed, so not a wrong verdict, but it sends an operator looking at
-    // branch state for a problem that is a missing binary.
-    if (err.code === 'ENOENT' || (err.status === 127 && /command not found/i.test(stderr))) {
+    // exiting 127, and ENOENT would mean /bin/sh itself is gone. Both spellings
+    // are matched rather than swapping one for the other, because the ENOENT
+    // branch becomes live again the moment this helper moves to an argv-form
+    // spawn. Without the 127 test a missing `gh` falls into 'other' and every
+    // caller reports it as a failed API read — fail-closed, so not a wrong
+    // verdict, but it sends an operator looking at branch state for a problem
+    // that is a missing binary.
+    //
+    // Keyed on the exit code and NOT on the message, because the message is the
+    // shell's and every shell words it differently — measured, not assumed:
+    // dash (Ubuntu's /bin/sh, so every CI runner) writes `gh: not found`, while
+    // macOS /bin/sh and bash write `gh: command not found`. All three exit 127,
+    // which is the POSIX code for it. A stderr test for `command not found`
+    // passes locally and silently stops classifying on every runner. No `gh`
+    // subcommand exits 127 itself, and one that did would land here as a FAIL
+    // either way — only the message would be less precise.
+    if (err.code === 'ENOENT' || err.status === 127) {
       return { ok: false, status: 'gh_missing', stdout, stderr };
     }
     if (/HTTP 404/i.test(stderr)) {
