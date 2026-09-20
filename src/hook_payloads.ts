@@ -312,8 +312,17 @@ export function editCollisionWarning(
  *
  * The hazard is nonetheless real, which is why this is an OPEN residual and not
  * a settled one: on a workspace of this project's size a full uncapped drain
- * renders roughly 1.8x the 10,000-byte additionalContext ceiling this repo
- * asserts (src/test/session_start.test.ts:336, :583).
+ * renders roughly 1.8x the 10,000-byte additionalContext ceiling.
+ *
+ * That ceiling is the PLATFORM's, not a house convention: Claude Code routes
+ * every hook's `additionalContext` through one helper that returns the string
+ * unchanged only while `length <= 1e4`, and above it persists the prose to a
+ * file and hands the model a 2,000-byte preview plus a path. The derivation
+ * and the exact bundle symbols are recorded on the constant in
+ * src/test/composed_context_budget.test.ts, which is the admit-path
+ * assertion; src/test/session_start.test.ts:336, :583 assert the same figure
+ * for session-start. Note the platform counts UTF-16 code units and both
+ * tests count UTF-8 bytes, which is the stricter direction on this prose.
  *
  * That ratio is the durable part. Do not add a notice COUNT here: bullet size
  * scales with path length, and any threshold expressed as "N notices" also
