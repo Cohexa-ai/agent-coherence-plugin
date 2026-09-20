@@ -348,8 +348,11 @@ export function preemptionNoticeText(
    * capped slice of them (SB-10's session-start block does). The intro
    * counts what the operator HAS, not how many bullets fit — reporting the
    * slice length would tell them three grants were revoked when forty were.
-   * Defaults to `notices.length`, so the uncapped admit-path callers keep
-   * their exact bytes.
+   * Defaults to `notices.length` for a caller that renders everything it was
+   * given. Both capped callers pass it explicitly: session-start at
+   * `session_start.ts` and the shared admit drain `drainNoticeText` in
+   * `hooks/_common.ts`, which passes the whole queue's length while
+   * rendering only `ADMIT_NOTICE_VERBATIM_CAP` of it.
    */
   totalCount: number = notices.length,
 ): string {
@@ -473,9 +476,14 @@ export const SESSION_START_OVERFLOW_LINE_TEMPLATE =
  * survive and reach the model on the next tracked-file admit; this says that
  * instead. Mirrors Python's `_build_preemption_text`, which dropped the same
  * /status pointer for the same reason.
+ *
+ * The leading `  • ` is load-bearing, not decoration: this line closes a
+ * bulleted list and Python's counterpart carries the same marker
+ * (`_build_preemption_text`, coordinator_server.py). Without it the block
+ * ends in an unbulleted orphan on every surface that renders it.
  */
 export const PREEMPTION_NOTICE_OVERFLOW_LINE_TEMPLATE =
-  "Plus {count} more preemptions since your last activity, still queued — " +
+  "  • Plus {count} more preemptions since your last activity, still queued — " +
   "they surface on your next tracked-file operation.";
 
 /**

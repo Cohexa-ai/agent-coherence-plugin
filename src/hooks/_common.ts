@@ -180,6 +180,32 @@ export function isValidContentHashRequired(h: unknown): h is string {
  * two backends coalesce at the same point.
  */
 export const ADMIT_NOTICE_VERBATIM_CAP = 3;
+/**
+ * TWO CONSEQUENCES OF CAPPING, both measured, both worth knowing before
+ * anyone tries to pin this surface.
+ *
+ * 1. The tiebreak now SELECTS, it does not merely order. The queue is
+ *    `preempted_at_unix_ts DESC, artifact_id DESC` and `nowTick()` floors to
+ *    whole seconds, so a burst of preemptions inside one second ties on the
+ *    timestamp and falls through to `artifact_id`, which is a `randomUUID()`.
+ *    Uncapped that was cosmetic — every notice rendered anyway. Capped, it
+ *    decides WHICH three the model sees. Measured: five runs of the same
+ *    five-notice scenario produced five different rendered sets. Nothing is
+ *    lost (the rest stay queued and surface next hook) and the choice is
+ *    among genuinely simultaneous events, so this is arbitrary rather than
+ *    wrong. Python ties far less often because it passes `time.time()` at
+ *    microsecond resolution rather than a floored second.
+ *
+ * 2. Which is why there is no `protocol_corpus` fixture for a >3-notice
+ *    pile-up, though CONTRIBUTING.md asks for one on a wire-shape change. A
+ *    corpus fixture asserts exact bytes, and by (1) the bytes are not stable
+ *    across runs. A cross-backend one is doubly impossible: notice prose is a
+ *    known non-parity surface where the two renderers share no byte-identical
+ *    line. The coalescing line IS pinned instead, anchored at line start, in
+ *    `src/test/composed_context_budget.test.ts` — an order-independent
+ *    property a fixture could not express.
+ */
+
 
 /**
  * Drain this agent's pending preemption notices and render them for an admit

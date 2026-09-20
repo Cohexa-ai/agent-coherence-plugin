@@ -40,8 +40,6 @@ interface PreBashBody {
   command?: unknown;
 }
 
-/** Drain + render this agent's pending preemption notices (mirrors pre_read's helper). */
-
 export async function handlePreBash(
   body: PreBashBody,
   res: ServerResponse,

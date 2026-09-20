@@ -568,7 +568,7 @@ test("session-start: the flattened notice block honours the verbatim cap (R5 siz
     assert.equal(r.status, 200);
     const text = sessionStartText(r.body);
     // Exactly three notice bullets survive verbatim...
-    assert.equal(text.split("\n").filter((l) => l.startsWith("  • ")).length, 3);
+    assert.equal(text.split("\n").filter((l) => l.startsWith("  • ") && !l.includes("more preemptions since your last activity")).length, 3);
     // The ARTIFACT block coalesces its remaining 37 and points at the status
     // surface, which does carry tracked-artifact paths and versions.
     const artifactOverflow = "Plus 37 more — run agent-coherence-status for the full picture.";
@@ -577,7 +577,7 @@ test("session-start: the flattened notice block honours the verbatim cap (R5 siz
     // /status tier carries notice data, so that pointer promises a surface
     // that cannot answer. Session-start PEEKS, so the rows really are queued.
     const noticeOverflow =
-      "Plus 37 more preemptions since your last activity, still queued — " +
+      "  • Plus 37 more preemptions since your last activity, still queued — " +
       "they surface on your next tracked-file operation.";
     assert.equal(text.split("\n").filter((l) => l === noticeOverflow).length, 1);
     assert.ok(Buffer.byteLength(text, "utf8") < 10_000);
@@ -593,7 +593,7 @@ test("session-start: the flattened notice block honours the verbatim cap (R5 siz
     assert.deepEqual(
       text
         .split("\n")
-        .filter((l) => l.startsWith("  • "))
+        .filter((l) => l.startsWith("  • ") && !l.includes("more preemptions since your last activity"))
         .map((l) => l.slice("  • ".length).split(" ")[0]),
       ["docs/plans/p39.md", "docs/plans/p38.md", "docs/plans/p37.md"],
     );
