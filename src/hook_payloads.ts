@@ -361,7 +361,35 @@ export function preemptionNoticeText(
     totalCount === 1
       ? "⚠ Your EXCLUSIVE grant on this artifact was silently revoked by another session:"
       : `⚠ ${totalCount} of your EXCLUSIVE grants were silently revoked by other sessions:`;
-  return `${intro}\n${lines.join("\n")}`;
+
+  // Byte bound. Drop WHOLE bullets from the tail until the block fits, never a
+  // byte offset: the prose carries ⚠, • and —, and cutting mid-sequence would
+  // emit invalid UTF-8. The registry returns notices newest-first
+  // (ORDER BY preempted_at_unix_ts DESC), so a prefix keeps the most recent —
+  // the ones that matter for the next decision.
+  let kept = lines.length;
+  let body = `${intro}\n${lines.join("\n")}`;
+  if (Buffer.byteLength(body, "utf8") > NOTICE_PROSE_MAX_BYTES) {
+    // Reserve room for the overflow line before deciding how many bullets fit,
+    // or the line that explains the truncation would itself overflow.
+    const reserve = Buffer.byteLength(
+      "\n" + NOTICE_PROSE_OMITTED_LINE_TEMPLATE.replace("{count}", String(lines.length)),
+      "utf8",
+    );
+    let used = Buffer.byteLength(intro, "utf8");
+    kept = 0;
+    for (const line of lines) {
+      const cost = Buffer.byteLength("\n" + line, "utf8");
+      if (used + cost + reserve > NOTICE_PROSE_MAX_BYTES) break;
+      used += cost;
+      kept += 1;
+    }
+    body =
+      `${intro}\n${lines.slice(0, kept).join("\n")}` +
+      "\n" +
+      NOTICE_PROSE_OMITTED_LINE_TEMPLATE.replace("{count}", String(lines.length - kept));
+  }
+  return body;
 }
 
 export function buildStaleResponse(summary: StaleSummary): StaleResponse {
@@ -473,6 +501,38 @@ export const SESSION_START_OVERFLOW_LINE_TEMPLATE =
  * instead. Mirrors Python's `_build_preemption_text`, which dropped the same
  * /status pointer for the same reason.
  */
+/**
+ * Byte ceiling for one rendered preemption-notice block.
+ *
+ * This repo asserts the hook surface carries under 10,000 bytes
+ * (src/test/session_start.test.ts:336, :583), and the notice block is not the
+ * only tenant: an admit path concatenates it with a stale-read or collision
+ * warning (~470B) and may then have re-grounding appended. 8,000 leaves that
+ * headroom.
+ *
+ * This is a BYTE bound, deliberately not the COUNT cap deferred on
+ * Cohexa-ai/agent-coherence-plugin#138. A count cap would drop notices that
+ * would otherwise have rendered, and since the pop deletes every row before
+ * the caller renders, those are destroyed rather than deferred — which is why
+ * that one needs a bounded consume and a reclaimer Node lacks. This engages
+ * only where the text would already be cut by the surface, arbitrarily and
+ * silently, with the rows already gone. Below it, nothing changes.
+ */
+export const NOTICE_PROSE_MAX_BYTES = 8_000;
+
+/**
+ * Closing line when the byte bound drops bullets.
+ *
+ * Deliberately NOT the session-start wording. That line promises the remainder
+ * "surface on your next tracked-file operation", which is true there because
+ * session-start PEEKS. On an admit path the pop already deleted them, so the
+ * same words would be a lie — the defect PR #140 fixed on the other overflow
+ * line. This says what actually happened.
+ */
+export const NOTICE_PROSE_OMITTED_LINE_TEMPLATE =
+  "({count} further preemption(s) omitted — the full list exceeded this hook's " +
+  "context budget and is not retrievable.)";
+
 export const SESSION_START_NOTICE_OVERFLOW_LINE_TEMPLATE =
   "Plus {count} more preemptions since your last activity, still queued — " +
   "they surface on your next tracked-file operation.";
