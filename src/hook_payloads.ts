@@ -317,22 +317,60 @@ export function editCollisionWarning(
  *     artifact, so it never fires. A bounded consume here would trade bounded
  *     prose for unbounded rows.
  *
- * And the hazard it would buy is small. `PRIMARY KEY (agent_id, artifact_id)`
- * bounds notices per agent by the TRACKED-ARTIFACT COUNT, and measured against
- * this renderer it takes 113 of them -- all preempted from one agent between
- * two of that agent's own hooks -- to pass Claude Code's 10KB additionalContext
- * ceiling (112 -> 10155 bytes, 113 -> 10246).
+ * HOW BIG IS THE HAZARD, corrected. An earlier revision of this comment said it
+ * takes 113 notices to breach the ceiling and called that remote. Both halves
+ * were wrong, and the correction is why this is still an OPEN residual rather
+ * than a settled one.
+ *
+ * The count is not a constant: it is a function of tracked-PATH LENGTH, because
+ * each bullet carries the path. The 113 was measured with 27-character synthetic
+ * paths. Real paths in this project average 67 characters, and against this
+ * repo's actual tracked set the crossover is 77. The ceiling was wrong too --
+ * that figure used 10240, while this repo's own assertion is `< 10_000`
+ * (src/test/session_start.test.ts:336, :583), under which even the old
+ * comment's own 112 -> 10155 row already breached.
+ *
+ * Measured against the sibling repo's real tracked set, which matches Node's
+ * DEFAULT_TRACKED_PATTERNS: 138 files, mean path 67 chars, a full uncapped
+ * drain renders 18,391 bytes -- 1.8x the ceiling. Capped at three it is 431
+ * bytes and constant at any N.
+ *
+ * `PRIMARY KEY (agent_id, artifact_id)` still bounds notices per agent by the
+ * tracked-artifact count, and a notice is only recorded for a peer holding a
+ * non-INVALID grant (registry.ts:379-381), which preemption then clears -- so
+ * the pile-up window is between two of the victim's OWN hooks. Reaching 77
+ * needs a peer preempting that many of one agent's live grants inside that
+ * window: a bulk edit pass across tracked docs does it, routine work does not.
+ * Real, not routine.
  *
  * The path where counts actually multiply is already handled: session-start
  * flattens notices across the parent AND every registered subagent, and it DOES
  * cap (SESSION_START_ARTIFACT_VERBATIM_CAP, newest-first, with an overflow
  * line). That is safe there because session-start PEEKS instead of popping, so
- * nothing it declines to render is lost.
+ * nothing it declines to render is lost. Admit paths cannot borrow that trick:
+ * each derives its own agentId from the composite (session, subagent) identity
+ * and drains only that agent, so subagent fan-out multiplies AGENTS rather than
+ * notices-per-agent -- and consumption there is load-bearing, since the next
+ * hook must not re-emit what this one showed.
  *
- * Revisit if either premise moves: real workspaces approaching ~100 tracked
- * artifacts, or session-stop gaining a notice drain that could act as the
- * reclaimer a bounded consume needs. Tracked as the open residual on
- * Cohexa-ai/agent-coherence-plugin#138.
+ * WHAT A FIX COSTS, so the next reader does not have to price it again. Three
+ * coupled parts, not one: (1) a bounded consume mirroring Python's
+ * `pop_pending_notices(consume_limit=)`, ~30 lines -- and Node's ordering is the
+ * SAFER side here, because the admit callers never re-sort, so the rendered set
+ * equals the deleted set by construction; (2) a reclaimer for the deferred
+ * remainder, cheapest as a session-stop notice drain (~25 lines, Python has one
+ * at coordinator_server.py:2411); (3) anti-starvation, because
+ * `upsertPendingNotice`'s ON CONFLICT moves a re-preempted artifact back to the
+ * HEAD of the newest-first queue, so a bounded consume can starve a cold tail
+ * that Python's TTL would age out. Plus ~15 tests. Handing the remainder back in
+ * a response `notices` array is NOT a fourth option: non-hookSpecificOutput keys
+ * are telemetry, never model context, so that converts deferred into destroyed.
+ *
+ * The trigger this comment used to name -- "workspaces approaching ~100 tracked
+ * artifacts" -- has already fired. It is open on
+ * Cohexa-ai/agent-coherence-plugin#138 as justified but unimplemented, gated on
+ * whether Node's notice render should converge on Python's bytes, which is a
+ * separate undecided question a cap must not settle by accident.
  */
 export function preemptionNoticeText(
   notices: ReadonlyArray<{
