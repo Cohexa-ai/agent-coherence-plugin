@@ -524,3 +524,159 @@ test('CLI shim resolves the PLUGIN_DATA-provisioned Node CLI on a dist-less pack
     cleanup();
   }
 });
+
+// ------------------------------------------------- npm-failure classification
+
+/**
+ * Drive the bootstrap with a stub `npm` earlier on PATH that fails with a
+ * canned log. The script invokes npm exactly once, so this reaches the
+ * install-failure branch and nothing else.
+ */
+function runBootstrapWithFailingNpm(root: string, data: string, ws: string, npmOutput: string) {
+  const stubBin = mkdtempSync(join(tmpdir(), 'provision-npmstub-'));
+  writeFileSync(
+    join(stubBin, 'npm'),
+    `#!/usr/bin/env bash\ncat <<'AC_STUB_LOG'\n${npmOutput}\nAC_STUB_LOG\nexit 1\n`
+  );
+  chmodSync(join(stubBin, 'npm'), 0o755);
+  try {
+    return spawnSync('bash', [join(root, 'bin', 'ensure-coordinator-node')], {
+      cwd: ws,
+      encoding: 'utf8',
+      timeout: 120000,
+      env: {
+        ...process.env,
+        PATH: `${stubBin}:${process.env.PATH ?? ''}`,
+        CLAUDE_PLUGIN_ROOT: root,
+        CLAUDE_PLUGIN_DATA: data,
+      } as NodeJS.ProcessEnv,
+    });
+  } finally {
+    rmSync(stubBin, { recursive: true, force: true });
+  }
+}
+
+const GYP_TAIL = [
+  'npm error gyp ERR! find Python checking Python explicitly set from NODE_GYP_FORCE_PYTHON',
+  'npm error gyp ERR! find Python - process.env.NODE_GYP_FORCE_PYTHON is "/nonexistent"',
+  'npm error gyp ERR! not ok',
+].join('\n');
+
+test('npm-failure hint says so when it could not capture the output at all', () => {
+  // With TMPDIR pointing at a nonexistent directory, mktemp fails, the log is
+  // never written and every classifier branch is skipped. The message must
+  // say that rather than reporting "no recognised cause in the npm output
+  // above" -- which claims an examination that never happened, the same class
+  // of misdirection the classifier exists to remove.
+  const root = makeStubRoot({});
+  const { data, ws, cleanup } = makeDirs();
+  const stubBin = mkdtempSync(join(tmpdir(), 'provision-npmstub-'));
+  writeFileSync(join(stubBin, 'npm'), `#!/usr/bin/env bash\necho "npm error boom"\nexit 1\n`);
+  chmodSync(join(stubBin, 'npm'), 0o755);
+  try {
+    const r = spawnSync('bash', [join(root, 'bin', 'ensure-coordinator-node')], {
+      cwd: ws,
+      encoding: 'utf8',
+      timeout: 120000,
+      env: {
+        ...process.env,
+        PATH: `${stubBin}:${process.env.PATH ?? ''}`,
+        TMPDIR: join(ws, 'no', 'such', 'dir'),
+        CLAUDE_PLUGIN_ROOT: root,
+        CLAUDE_PLUGIN_DATA: data,
+      } as NodeJS.ProcessEnv,
+    });
+    assert.equal(r.status, 1, 'a failed install must still exit 1 without a capture');
+    assert.match(r.stderr ?? '', /could not be captured/);
+    assert.doesNotMatch(r.stderr ?? '', /no recognised cause in the npm output above/);
+  } finally {
+    rmSync(stubBin, { recursive: true, force: true });
+    cleanup();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('npm-failure hint DISCRIMINATES a fetch flake from a missing prebuilt', () => {
+  // Both failures end in the SAME node-gyp trace, because better-sqlite3
+  // compiles from source whenever it cannot place a prebuilt binary for any
+  // reason. The old hint asserted the first explanation unconditionally, so
+  // a dropped connection read as "your Node version is unsupported" and sent
+  // the reader to change Node. Observed for real on 2026-09-20 (CI job
+  // "Zero-Python install (Node 24)"), where the only discriminating line was
+  // `prebuild-install warn install read ECONNRESET` and a rerun went green.
+  const cases: Array<{ name: string; npm: string; expect: RegExp; reject: RegExp }> = [
+    {
+      // DEFENSIVE branch: `target=` disagrees with the running major. Stage 0
+      // rejects an unsupported major before the install runs, so this should
+      // be unreachable; the branch exists so a future Stage-0 change cannot
+      // silently turn it into the case below.
+      name: 'target disagrees with the running major (defensive)',
+      npm: `npm error prebuild-install warn install No prebuilt binaries found (target=23.0.0 runtime=node arch=x64 libc= platform=linux)\n${GYP_TAIL}`,
+      expect: /switch Node majors/,
+      reject: /transient: RETRY/,
+    },
+    {
+      // THE REACHABLE ONE, and the reason this whole block was wrong.
+      // `prebuild-install` emits "No prebuilt binaries found" for ANY non-200
+      // response, not just a missing ABI: download.js does
+      // `if (res.statusCode !== 200) return onerror()` with no argument, and
+      // `onerror` falls through to `error.noPrebuilts(opts)`. So a 404 or a
+      // 503 from the release CDN lands here with `target=` equal to the
+      // running major -- which Stage 0 has already guaranteed is supported.
+      // Telling that operator to switch Node majors is impossible advice.
+      name: 'supported major, prebuilt could not be placed',
+      npm:
+        `npm error prebuild-install warn install No prebuilt binaries found ` +
+        `(target=${process.versions.node} runtime=node arch=x64 libc= platform=linux)\n${GYP_TAIL}`,
+      expect: /could not be placed for this platform/,
+      reject: /switch Node majors/,
+    },
+    {
+      // ESTRICTALLOWSCRIPTS is a terminal npm error code, not a warning, so a
+      // log carrying it is that failure whatever prebuild-install logged on
+      // the way. Reachable with more than one native dependency.
+      name: 'allowScripts block wins over a transport warn',
+      npm:
+        `npm error prebuild-install warn install read ECONNRESET\n` +
+        `npm error code ESTRICTALLOWSCRIPTS\nnpm error Cannot run script`,
+      expect: /allowScripts entry/,
+      reject: /transient: RETRY/,
+    },
+    {
+      name: 'transient fetch failure',
+      npm: `npm error prebuild-install warn install read ECONNRESET\n${GYP_TAIL}`,
+      expect: /transient: RETRY/,
+      reject: /retrying will not help/,
+    },
+    {
+      name: 'npm 11 blocked the install script',
+      npm: 'npm error code ESTRICTALLOWSCRIPTS\nnpm error Cannot run script',
+      expect: /allowScripts entry/,
+      reject: /prebuilt binary could not be DOWNLOADED/,
+    },
+    {
+      name: 'unrecognised',
+      npm: 'npm error ENOSPC no space left on device',
+      expect: /no recognised cause/,
+      reject: /cause: /,
+    },
+  ];
+
+  for (const c of cases) {
+    const root = makeStubRoot({});
+    const { data, ws, cleanup } = makeDirs();
+    try {
+      const r = runBootstrapWithFailingNpm(root, data, ws, c.npm);
+      assert.equal(r.status, 1, `${c.name}: a failed install must exit 1`);
+      const err = r.stderr ?? '';
+      assert.match(err, c.expect, `${c.name}: wrong or missing cause line`);
+      assert.doesNotMatch(err, c.reject, `${c.name}: emitted a cause that contradicts the log`);
+      // The remedy is the point of the hint: a reader who acts on the wrong
+      // one either changes Node for nothing or retries forever.
+      assert.match(err, /npm install failed/, `${c.name}: kept the headline`);
+    } finally {
+      cleanup();
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+});
