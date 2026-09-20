@@ -1039,8 +1039,39 @@ export class ArtifactRegistry {
     return this.selectPendingNoticesForAgent(agentId);
   }
 
-  /** Return + drain pending notices for one agent. Used by pre-read/pre-edit hooks. */
-  popPendingNoticesForAgent(agentId: string): Array<{
+  /**
+   * Return pending notices for one agent, newest-first, and DELETE the ones
+   * the caller commits to rendering.
+   *
+   * `consumeLimit` is how many the caller can actually deliver, and it bounds
+   * the DELETE only — the SELECT and the return value stay whole. That
+   * asymmetry is the whole design, and it is Python's
+   * (`sqlite_registry.pop_pending_notices`):
+   *
+   *   - The caller gets the TRUE pending count from data it still holds, so
+   *     its overflow line is arithmetic rather than a guess. A method that
+   *     returned only the consumed slice would make "Plus K more" unknowable
+   *     without a second query.
+   *   - The rows it declines to render stay in the table and surface on that
+   *     agent's next admit hook. Deleting rows a response never showed
+   *     destroys the operator's only record of who preempted them, which is
+   *     exactly how a render-only cap (PR #150) turned DEFERRED into
+   *     DESTROYED.
+   *
+   * Because the returned list is ordered newest-first and the caller's own
+   * cap slices the same list from the front, the set rendered is by
+   * construction the set deleted. Node is the safer side of this than Python
+   * here: Python's renderer re-sorts internally and depends on sort stability
+   * to reproduce the tiebreak, while the Node admit callers never re-sort.
+   *
+   * Omitting `consumeLimit` drains everything, which is the unchanged default
+   * and keeps the bulk DELETE — an IN-list over a large pending set would
+   * bind one variable per row and can exceed SQLITE_LIMIT_VARIABLE_NUMBER.
+   */
+  popPendingNoticesForAgent(
+    agentId: string,
+    consumeLimit?: number,
+  ): Array<{
     artifactId: string;
     preempterAgentId: string;
     preemptedAtUnixTs: number;
@@ -1052,7 +1083,17 @@ export class ArtifactRegistry {
         this.db.exec("COMMIT");
         return [];
       }
-      this.db.prepare(`DELETE FROM pending_notices WHERE agent_id = ?`).run(agentId);
+      const consumed = consumeLimit === undefined ? notices : notices.slice(0, consumeLimit);
+      if (consumeLimit === undefined) {
+        this.db.prepare(`DELETE FROM pending_notices WHERE agent_id = ?`).run(agentId);
+      } else if (consumed.length > 0) {
+        const placeholders = consumed.map(() => "?").join(", ");
+        this.db
+          .prepare(
+            `DELETE FROM pending_notices WHERE agent_id = ? AND artifact_id IN (${placeholders})`,
+          )
+          .run(agentId, ...consumed.map((n) => n.artifactId));
+      }
       this.db.exec("COMMIT");
       return notices;
     } catch (err) {

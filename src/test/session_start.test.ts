@@ -30,7 +30,7 @@ import {
   SESSION_START_STALE_LINE_TEMPLATE,
   SESSION_START_TOUCHED_LINE_TEMPLATE,
   SESSION_START_OVERFLOW_LINE_TEMPLATE,
-  SESSION_START_NOTICE_OVERFLOW_LINE_TEMPLATE,
+  PREEMPTION_NOTICE_OVERFLOW_LINE_TEMPLATE,
   SESSION_START_SUBAGENT_PREFIX_TEMPLATE,
   SESSION_START_CLOSING_LINE,
   emitSessionStart,
@@ -98,9 +98,9 @@ test("session-start: the notice overflow line names no surface that lacks notice
   // Python dropped the /status pointer from its own notice overflow line in
   // c05fbd9 for exactly this reason. Node's GET /status carries no notice
   // field at any tier, so naming it here would be a promise it cannot keep.
-  assert.doesNotMatch(SESSION_START_NOTICE_OVERFLOW_LINE_TEMPLATE, /agent-coherence-status/);
-  assert.doesNotMatch(SESSION_START_NOTICE_OVERFLOW_LINE_TEMPLATE, /GET \/status/);
-  assert.match(SESSION_START_NOTICE_OVERFLOW_LINE_TEMPLATE, /still queued/);
+  assert.doesNotMatch(PREEMPTION_NOTICE_OVERFLOW_LINE_TEMPLATE, /agent-coherence-status/);
+  assert.doesNotMatch(PREEMPTION_NOTICE_OVERFLOW_LINE_TEMPLATE, /GET \/status/);
+  assert.match(PREEMPTION_NOTICE_OVERFLOW_LINE_TEMPLATE, /still queued/);
 });
 
 test("session-start: the seven prose constants byte-match the Python source (KTD8)", () => {

@@ -145,3 +145,60 @@ test("an out-of-order older preemption still cannot overwrite a newer notice", (
     cleanup();
   }
 });
+
+test("a bounded consume DELETES only what the caller renders, and returns the whole queue", () => {
+  const { registry, cleanup } = makeRegistry();
+  try {
+    for (let i = 0; i < 10; i++) queueNotice(registry, `docs/plans/r${i}.md`, 4000 + i);
+
+    // Mirrors Python's pop_pending_notices(consume_limit=): SELECT every row,
+    // DELETE only the newest `limit`, and return ALL of them so the caller can
+    // report an honest total without a second query. Returning only the
+    // consumed slice is what makes an overflow count a guess.
+    const popped = registry.popPendingNoticesForAgent(VICTIM, 3);
+    assert.equal(popped.length, 10, "the caller must still learn the TRUE pending count");
+    assert.deepEqual(
+      popped.slice(0, 3).map((n) => n.preemptedAtUnixTs),
+      [4009, 4008, 4007],
+      "the consumed slice is the newest three",
+    );
+
+    // The deleted set must equal the rendered set, or the operator loses the
+    // record of a preemption that was never shown to them.
+    const left = registry.peekPendingNoticesForAgent(VICTIM);
+    assert.equal(left.length, 7, "only the rendered three may be consumed");
+    assert.deepEqual(
+      left.map((n) => n.preemptedAtUnixTs),
+      [4006, 4005, 4004, 4003, 4002, 4001, 4000],
+      "the tail stays queued, still newest-first",
+    );
+  } finally {
+    cleanup();
+  }
+});
+
+test("an unbounded consume still drains everything (the default is unchanged)", () => {
+  const { registry, cleanup } = makeRegistry();
+  try {
+    for (let i = 0; i < 5; i++) queueNotice(registry, `docs/plans/s${i}.md`, 6000 + i);
+    const popped = registry.popPendingNoticesForAgent(VICTIM);
+    assert.equal(popped.length, 5);
+    assert.equal(registry.peekPendingNoticesForAgent(VICTIM).length, 0);
+  } finally {
+    cleanup();
+  }
+});
+
+test("a consume limit at or above the queue length leaves nothing behind", () => {
+  const { registry, cleanup } = makeRegistry();
+  try {
+    for (let i = 0; i < 3; i++) queueNotice(registry, `docs/plans/t${i}.md`, 7000 + i);
+    // Boundary: `limit === length` must not leave a row, and must not throw on
+    // an empty IN-list either.
+    assert.equal(registry.popPendingNoticesForAgent(VICTIM, 3).length, 3);
+    assert.equal(registry.peekPendingNoticesForAgent(VICTIM).length, 0);
+    assert.equal(registry.popPendingNoticesForAgent(VICTIM, 5).length, 0);
+  } finally {
+    cleanup();
+  }
+});

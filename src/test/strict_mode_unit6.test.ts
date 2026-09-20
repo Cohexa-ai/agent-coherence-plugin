@@ -20,7 +20,7 @@ import { ArtifactRegistry } from "../registry.js";
 import { PolicyRef } from "../policy.js";
 import { SessionRegistry } from "../sessions.js";
 import { createServer } from "../server.js";
-import { drainNoticeText } from "../hooks/pre_bash.js";
+import { drainNoticeText } from "../hooks/_common.js";
 import {
   emitAllow,
   emitStrictDeny,

@@ -12,6 +12,11 @@ import type { ArtifactRegistry } from "../registry.js";
 import type { PolicyRef } from "../policy.js";
 import type { SessionRegistry } from "../sessions.js";
 import { isValidSubagentId } from "../agent_id.js";
+import {
+  preemptionNoticeText,
+  shortSessionId,
+  PREEMPTION_NOTICE_OVERFLOW_LINE_TEMPLATE,
+} from "../hook_payloads.js";
 
 export interface HookDeps {
   registry: ArtifactRegistry;
@@ -166,4 +171,54 @@ export function isValidContentHashOrAbsent(h: unknown): h is string | undefined 
 
 export function isValidContentHashRequired(h: unknown): h is string {
   return typeof h === "string" && CONTENT_HASH_RE.test(h);
+}
+
+/**
+ * How many preemption notices one admit response renders verbatim before
+ * coalescing the rest into a count. Mirrors Python's
+ * `_PREEMPTION_PROSE_VERBATIM_CAP`, and deliberately the same value, so the
+ * two backends coalesce at the same point.
+ */
+export const ADMIT_NOTICE_VERBATIM_CAP = 3;
+
+/**
+ * Drain this agent's pending preemption notices and render them for an admit
+ * response — bounded, and the ONE place that bound exists.
+ *
+ * Previously each of pre_read, pre_edit and pre_bash/pre_grep popped and
+ * rendered inline, each with its own copy of the same twelve lines. Three
+ * copies of a cap is three chances for one to drift, and the whole failure
+ * mode this bound exists to prevent is a response that renders more than it
+ * promised or deletes more than it rendered.
+ *
+ * The bound is on the CONSUME, not on the render. `popPendingNoticesForAgent`
+ * deletes only the slice named here and returns the whole queue, so:
+ *
+ *   - the intro reports the true pending total, not the bullet count;
+ *   - the overflow line's count is arithmetic on data in hand;
+ *   - and the rows not rendered are still in the table, which is what makes
+ *     "still surface on your next tracked-file operation" a true sentence
+ *     rather than the false one a render-only cap would print.
+ */
+export function drainNoticeText(deps: HookDeps, agentId: string): string | null {
+  const all = deps.registry.popPendingNoticesForAgent(agentId, ADMIT_NOTICE_VERBATIM_CAP);
+  if (all.length === 0) return null;
+  // Same slice, same order, as the DELETE consumed — the list is newest-first
+  // and neither side re-sorts it.
+  const verbatim = all.slice(0, ADMIT_NOTICE_VERBATIM_CAP);
+  const rendered = verbatim.map((n) => {
+    const art = deps.registry.getArtifactById(n.artifactId);
+    const preempterSession = deps.sessions.agentIdToSessionId(n.preempterAgentId) ?? "<unknown>";
+    return {
+      artifactPath: art?.name ?? "<unknown-artifact>",
+      preempterSessionShort: shortSessionId(preempterSession),
+      preemptedAtUnixTs: n.preemptedAtUnixTs,
+    };
+  });
+  let text = preemptionNoticeText(rendered, all.length);
+  const overflow = all.length - verbatim.length;
+  if (overflow > 0) {
+    text += "\n" + PREEMPTION_NOTICE_OVERFLOW_LINE_TEMPLATE.replace("{count}", String(overflow));
+  }
+  return text;
 }
