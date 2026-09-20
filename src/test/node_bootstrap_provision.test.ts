@@ -532,12 +532,30 @@ test('CLI shim resolves the PLUGIN_DATA-provisioned Node CLI on a dist-less pack
  * canned log. The script invokes npm exactly once, so this reaches the
  * install-failure branch and nothing else.
  */
+/**
+ * A stub `npm` that models prebuild-install's ACTUAL gating: its
+ * `log.http(status, url)` line is emitted only when the caller raised the log
+ * level (`log.js:14` reads `npm_config_loglevel`, which npm sets from
+ * `--loglevel`). A stub that printed it unconditionally would let the real
+ * script drop `--loglevel=http` and leave every status test green -- which is
+ * exactly the hole this shape closes, since asking for the status is the only
+ * thing the flag buys.
+ */
+function stubNpmScript(npmOutput: string, exitCode = 1): string {
+  return (
+    `#!/usr/bin/env bash\n` +
+    `emit() { cat <<'AC_STUB_LOG'\n${npmOutput}\nAC_STUB_LOG\n}\n` +
+    `case " $* " in\n` +
+    `  *" --loglevel=http "*) emit ;;\n` +
+    `  *) emit | grep -v 'prebuild-install http ' ;;\n` +
+    `esac\n` +
+    `exit ${exitCode}\n`
+  );
+}
+
 function runBootstrapWithFailingNpm(root: string, data: string, ws: string, npmOutput: string) {
   const stubBin = mkdtempSync(join(tmpdir(), 'provision-npmstub-'));
-  writeFileSync(
-    join(stubBin, 'npm'),
-    `#!/usr/bin/env bash\ncat <<'AC_STUB_LOG'\n${npmOutput}\nAC_STUB_LOG\nexit 1\n`
-  );
+  writeFileSync(join(stubBin, 'npm'), stubNpmScript(npmOutput));
   chmodSync(join(stubBin, 'npm'), 0o755);
   try {
     return spawnSync('bash', [join(root, 'bin', 'ensure-coordinator-node')], {
@@ -561,6 +579,103 @@ const GYP_TAIL = [
   'npm error gyp ERR! find Python - process.env.NODE_GYP_FORCE_PYTHON is "/nonexistent"',
   'npm error gyp ERR! not ok',
 ].join('\n');
+
+test('a successful install is not reported as failed when the filter eats every line', () => {
+  // The pipeline's exit-status contract, isolated. npm exits 0 while `grep -v`
+  // matches nothing and exits 1 -- so under `set -o pipefail` the PIPELINE's
+  // status is 1, and reading `$?` instead of `PIPESTATUS[0]` would turn a
+  // clean install into "npm install failed". Every other stub in this file
+  // exits non-zero, so this inversion is otherwise only covered by accident.
+  //
+  // The script still exits non-zero afterwards, because the stub installs no
+  // real addon and the install-time verification catches that. What this
+  // pins is the reason: the npm step must not be blamed.
+  const root = makeStubRoot({});
+  const { data, ws, cleanup } = makeDirs();
+  const stubBin = mkdtempSync(join(tmpdir(), 'provision-npmstub-'));
+  const onlyFilteredLines = [
+    'npm http cache a@https://registry.npmjs.org/a 3ms (cache hit)',
+    'npm http fetch GET 200 https://registry.npmjs.org/b 7ms',
+  ].join('\n');
+  writeFileSync(join(stubBin, 'npm'), stubNpmScript(onlyFilteredLines, 0));
+  chmodSync(join(stubBin, 'npm'), 0o755);
+  try {
+    const r = spawnSync('bash', [join(root, 'bin', 'ensure-coordinator-node')], {
+      cwd: ws,
+      encoding: 'utf8',
+      timeout: 120000,
+      env: {
+        ...process.env,
+        PATH: `${stubBin}:${process.env.PATH ?? ''}`,
+        CLAUDE_PLUGIN_ROOT: root,
+        CLAUDE_PLUGIN_DATA: data,
+      } as NodeJS.ProcessEnv,
+    });
+    const err = r.stderr ?? '';
+    assert.doesNotMatch(
+      err,
+      /npm install failed/,
+      'npm exited 0; the filter exiting 1 must not be read as the install failing'
+    );
+    // And no cause line, since there was no npm failure to classify.
+    assert.doesNotMatch(err, /agent-coherence: cause:/);
+  } finally {
+    rmSync(stubBin, { recursive: true, force: true });
+    cleanup();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('registry chatter is filtered from the display but kept for classification', () => {
+  // --loglevel=http is what surfaces the asset fetch's status, and it also
+  // makes npm log one line per package: 148 lines / 16KB warm and 298 / 31KB
+  // cold on this repo's own tree. This script's stdout is a SessionStart
+  // hook's stdout, so unfiltered that lands in the model's context at several
+  // times the 10,000-byte ceiling and would evict the diagnostic it came for.
+  // The filter is on the DISPLAY only; the captured log keeps everything,
+  // which is why the classifier below still sees the 503.
+  const root = makeStubRoot({});
+  const { data, ws, cleanup } = makeDirs();
+  const stubBin = mkdtempSync(join(tmpdir(), 'provision-npmstub-'));
+  const chatter = Array.from(
+    { length: 40 },
+    (_, i) => `npm http cache pkg${i}@https://registry.npmjs.org/pkg${i} 3ms (cache hit)`
+  ).join('\n');
+  writeFileSync(
+    join(stubBin, 'npm'),
+    stubNpmScript(
+      `${chatter}\n` +
+        `npm http fetch GET 200 https://registry.npmjs.org/other 12ms\n` +
+        `npm error prebuild-install http 503 https://github.com/x/a.tar.gz\n` +
+        `npm error prebuild-install warn install No prebuilt binaries found (target=${process.versions.node} runtime=node arch=x64 libc= platform=linux)`
+    )
+  );
+  chmodSync(join(stubBin, 'npm'), 0o755);
+  try {
+    const r = spawnSync('bash', [join(root, 'bin', 'ensure-coordinator-node')], {
+      cwd: ws,
+      encoding: 'utf8',
+      timeout: 120000,
+      env: {
+        ...process.env,
+        PATH: `${stubBin}:${process.env.PATH ?? ''}`,
+        CLAUDE_PLUGIN_ROOT: root,
+        CLAUDE_PLUGIN_DATA: data,
+      } as NodeJS.ProcessEnv,
+    });
+    const shown = (r.stdout ?? '') + (r.stderr ?? '');
+    assert.doesNotMatch(shown, /npm http cache pkg0@/, 'registry chatter must not reach the display');
+    assert.doesNotMatch(shown, /npm http fetch GET 200/, 'successful registry fetches must not either');
+    // Kept: npm prefixes prebuild-install's lines `npm error `, not `npm http `.
+    assert.match(shown, /prebuild-install http 503/, "prebuild-install's own lines must survive the filter");
+    // And the classifier read the status out of the captured log.
+    assert.match(shown, /server said 503/);
+  } finally {
+    rmSync(stubBin, { recursive: true, force: true });
+    cleanup();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 test('npm-failure hint says so when it could not capture the output at all', () => {
   // With TMPDIR pointing at a nonexistent directory, mktemp fails, the log is
@@ -613,6 +728,45 @@ test('npm-failure hint DISCRIMINATES a fetch flake from a missing prebuilt', () 
       name: 'target disagrees with the running major (defensive)',
       npm: `npm error prebuild-install warn install No prebuilt binaries found (target=23.0.0 runtime=node arch=x64 libc= platform=linux)\n${GYP_TAIL}`,
       expect: /switch Node majors/,
+      reject: /transient: RETRY/,
+    },
+    {
+      // A non-200 that IS worth retrying. prebuild-install collapses every
+      // non-200 into "No prebuilt binaries found" (download.js:56 calls
+      // onerror() with no argument), so without the status this reads as a
+      // possibly-permanent platform gap -- the exact over-claim the status
+      // line exists to remove.
+      name: 'transient 503 on the asset fetch',
+      npm:
+        `npm error prebuild-install http 503 https://github.com/x/releases/download/v1/a.tar.gz\n` +
+        `npm error prebuild-install warn install No prebuilt binaries found ` +
+        `(target=${process.versions.node} runtime=node arch=x64 libc= platform=linux)\n${GYP_TAIL}`,
+      expect: /server said 503\.[\s\S]*transient: RETRY/,
+      reject: /no prebuilt is published/,
+    },
+    {
+      // Not every non-200 is retryable. A corporate proxy or firewall refusing
+      // the release host returns 403, and telling that operator "transient:
+      // RETRY" sends them round a loop that can never succeed. Only 5xx and
+      // 429 are worth retrying.
+      name: '403 — refused, not transient',
+      npm:
+        `npm error prebuild-install http 403 https://github.com/x/releases/download/v1/a.tar.gz\n` +
+        `npm error prebuild-install warn install No prebuilt binaries found ` +
+        `(target=${process.versions.node} runtime=node arch=x64 libc= platform=linux)\n${GYP_TAIL}`,
+      expect: /refused — the server said 403/,
+      reject: /transient: RETRY/,
+    },
+    {
+      // 404 means the asset is not there. NOT stated as permanent: a release
+      // rollout can 404 mid-publish, an unsynced binary-host mirror 404s, and
+      // blocking proxies 404 disallowed hosts.
+      name: '404 — asset not published for this platform',
+      npm:
+        `npm error prebuild-install http 404 https://github.com/x/releases/download/v1/a.tar.gz\n` +
+        `npm error prebuild-install warn install No prebuilt binaries found ` +
+        `(target=${process.versions.node} runtime=node arch=x64 libc= platform=linux)\n${GYP_TAIL}`,
+      expect: /no prebuilt is published for this platform/,
       reject: /transient: RETRY/,
     },
     {
