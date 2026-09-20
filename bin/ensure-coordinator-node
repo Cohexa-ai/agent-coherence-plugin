@@ -186,6 +186,11 @@ if [ "$deps_changed" = "1" ] || [ "$native_stale" = "1" ]; then
   # Capture as well as show, so the failure below can be CLASSIFIED rather
   # than guessed at. PIPESTATUS[0] is npm's status; $? would be tee's.
   npm_log="$(mktemp "${TMPDIR:-/tmp}/agent-coherence-npm.XXXXXX" 2>/dev/null || echo "")"
+  # The in-line `rm`s below cover the ordinary exits; this covers the ones
+  # that skip them. A cold `npm install` regularly outruns the SessionStart
+  # hook's time box, and without the trap every timed-out provision leaves a
+  # full npm log behind in TMPDIR.
+  trap 'rm -f "$npm_log"' EXIT
   if [ -n "$npm_log" ]; then
     (cd "${CLAUDE_PLUGIN_DATA}" && npm install --engine-strict --no-audit --no-fund --no-progress 2>&1) | tee "$npm_log"
     npm_status=${PIPESTATUS[0]}
@@ -196,31 +201,60 @@ if [ "$deps_changed" = "1" ] || [ "$native_stale" = "1" ]; then
   if [ "$npm_status" -ne 0 ]; then
     rm -f "${CLAUDE_PLUGIN_DATA}/package.json"
     echo "agent-coherence: npm install failed; coordinator will not start this session. Next session retries." >&2
-    # WHY CLASSIFY. All three failures below end in the same node-gyp
-    # "find Python" trace, because better-sqlite3 falls back to compiling
-    # whenever it cannot place a prebuilt binary -- for ANY reason. This
-    # block used to assert the first explanation unconditionally, which sent
-    # the reader to check their Node version even when the real cause was a
-    # dropped connection. prebuild-install logs the deciding fact itself:
-    # `log.warn('install', err.message)` (prebuild-install/bin.js:60,70), so
-    # the warn line carries "No prebuilt binaries found (target=...)" for a
-    # genuine ABI gap and the transport error otherwise.
-    if [ -n "$npm_log" ] && grep -qiE 'prebuild-install.+warn.+install.+No prebuilt binaries found' "$npm_log"; then
-      echo "agent-coherence: cause: this Node major has no better-sqlite3 prebuilt." >&2
-      echo "agent-coherence: supported majors are 22 / 24 / 25; running $(node -v 2>/dev/null || echo 'unknown')." >&2
-      echo "agent-coherence: retrying will not help — switch Node majors." >&2
-    elif [ -n "$npm_log" ] && grep -qiE 'prebuild-install.+warn.+install' "$npm_log"; then
+    # WHY CLASSIFY, and why the order below is load-bearing. Every failure
+    # here ends in the same node-gyp "find Python" trace, because
+    # better-sqlite3 falls back to compiling whenever it cannot place a
+    # prebuilt binary -- for ANY reason. This block used to assert the first
+    # explanation unconditionally, which sent the reader to check their Node
+    # version even when the real cause was a dropped connection.
+    #
+    # ESTRICTALLOWSCRIPTS is tested FIRST because it is a terminal npm error
+    # code rather than a warning: a log carrying it is that failure whatever
+    # prebuild-install managed to log on the way, and with more than one
+    # native dependency both can appear.
+    if [ -z "$npm_log" ]; then
+      # Say what happened, not what we guess. mktemp failed, so npm's output
+      # was never captured and nothing was examined.
+      echo "agent-coherence: (npm's output could not be captured — mktemp failed — so no" >&2
+      echo "agent-coherence: cause was classified. The usual three are a missing prebuilt for" >&2
+      echo "agent-coherence: this platform, a failed prebuilt download, and an" >&2
+      echo "agent-coherence: ESTRICTALLOWSCRIPTS block on the install script.)" >&2
+    elif grep -q 'ESTRICTALLOWSCRIPTS' "$npm_log"; then
+      echo "agent-coherence: cause: npm 11 blocked an install script. The allowScripts entry in" >&2
+      echo "agent-coherence: package.json covers better-sqlite3's prebuilt fetch, so a NEW package" >&2
+      echo "agent-coherence: there needs adding to it." >&2
+    elif grep -qiE 'prebuild-install.+warn.+install.+No prebuilt binaries found' "$npm_log"; then
+      # "No prebuilt binaries found" does NOT mean the ABI is unsupported. It
+      # is also what prebuild-install reports for any non-200 response:
+      # download.js does `if (res.statusCode !== 200) return onerror()` with
+      # no argument, and onerror falls through to `error.noPrebuilts(opts)`.
+      # The message's own `target=` field is the discriminator, and Stage 0
+      # has already refused to get here on an unsupported major -- so when
+      # they agree, the major is fine and the prebuilt simply could not be
+      # placed. The HTTP status would separate a missing asset from a
+      # transient 5xx, but prebuild-install logs it at `http` level, which is
+      # below npm's default threshold and absent from real failure logs; the
+      # two are genuinely indistinguishable here, so say so.
+      target_major="$(sed -n 's/.*No prebuilt binaries found (target=v\{0,1\}\([0-9][0-9]*\)\..*/\1/p' "$npm_log" | head -n 1)"
+      if [ -n "$target_major" ] && [ "$target_major" != "$NODE_MAJOR" ]; then
+        echo "agent-coherence: cause: no better-sqlite3 prebuilt for Node ${target_major}." >&2
+        echo "agent-coherence: supported majors are 22 / 24 / 25; running ${NODE_VERSION_RAW}." >&2
+        echo "agent-coherence: retrying will not help — switch Node majors." >&2
+      else
+        echo "agent-coherence: cause: a better-sqlite3 prebuilt could not be placed for this platform." >&2
+        echo "agent-coherence: Node ${NODE_VERSION_RAW} is supported, so this is NOT your Node version:" >&2
+        echo "agent-coherence: either no prebuilt is published for this platform/arch/libc, or the" >&2
+        echo "agent-coherence: download returned a non-200. prebuild-install reports both the same" >&2
+        echo "agent-coherence: way, so try ONE retry; if it persists, this platform has no prebuilt." >&2
+      fi
+    elif grep -qiE 'prebuild-install.+warn.+install' "$npm_log"; then
       echo "agent-coherence: cause: the prebuilt binary could not be DOWNLOADED (see the" >&2
       echo "agent-coherence: 'prebuild-install warn install' line above — e.g. ECONNRESET). The" >&2
       echo "agent-coherence: node-gyp trace after it is the fallback failing, not the cause, and" >&2
       echo "agent-coherence: your Node major is fine. This is transient: RETRY." >&2
-    elif [ -n "$npm_log" ] && grep -q 'ESTRICTALLOWSCRIPTS' "$npm_log"; then
-      echo "agent-coherence: cause: npm 11 blocked an install script. The allowScripts entry in" >&2
-      echo "agent-coherence: package.json covers better-sqlite3's prebuilt fetch, so a NEW package" >&2
-      echo "agent-coherence: there needs adding to it." >&2
     else
       echo "agent-coherence: (no recognised cause in the npm output above. The usual three are a" >&2
-      echo "agent-coherence: missing prebuilt for this Node major, a failed prebuilt download, and" >&2
+      echo "agent-coherence: missing prebuilt for this platform, a failed prebuilt download, and" >&2
       echo "agent-coherence: an ESTRICTALLOWSCRIPTS block on the install script.)" >&2
     fi
     rm -f "$npm_log"
