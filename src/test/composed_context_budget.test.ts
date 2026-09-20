@@ -39,9 +39,18 @@ import { createServer } from "../server.js";
 const SECRET = "s".repeat(32);
 
 /**
- * The ceiling Python asserts for the composed admit payload. Not a Node
- * constant — Node has none, which is the gap this file records — so it is
- * stated here as the contract these tests hold the payload to.
+ * The ceiling Python asserts for the composed admit payload
+ * (tests/test_claude_code_coordinator_server.py:1025). Not a Node constant —
+ * Node has none, which is the gap this file records — so it is stated here as
+ * the contract these tests hold the payload to.
+ *
+ * This repo states a SECOND, tighter ceiling of `< 10_000` for the
+ * session-start payload (src/test/session_start.test.ts:336, :583), and that
+ * is not an inconsistency introduced here: Python carries both too, 10240 for
+ * the composed admit payload at :1025 and 10_000 for session-start at :3857.
+ * The admit path and session-start are different surfaces with different
+ * co-tenants; this file mirrors the admit-path figure because that is the
+ * surface it measures.
  */
 const COMPOSED_CONTEXT_CEILING_BYTES = 10_240;
 
@@ -90,7 +99,7 @@ async function makeServer() {
 async function composedContextAfterPreemptions(
   n: number,
   pathLen: number,
-): Promise<string> {
+): Promise<{ text: string; bullets: string[] }> {
   const { post, cleanup } = await makeServer();
   try {
     const pad = Math.max(1, pathLen - 14);
@@ -102,10 +111,28 @@ async function composedContextAfterPreemptions(
       const attacker = `2222${String(i).padStart(4, "0")}-2222-4222-8222-222222222222`;
       await post("/hooks/pre-edit", { session_id: attacker, path: paths[i] });
     }
+    // Arm deferred re-grounding through the REAL session-start endpoint, so the
+    // measured payload carries all three co-tenants rather than two. This is
+    // not decoration: re-grounding was the LARGEST co-tenant in the overrun
+    // that motivated this file, and a fixture without it measures the section
+    // least likely to cause the problem. Mirrors `armReground` in
+    // src/test/deferred_reground_unit8.test.ts.
+    await post("/hooks/session-start", { session_id: victim });
+
     const body = await post("/hooks/pre-read", { session_id: victim, path: paths[0] });
     const hso = body["hookSpecificOutput"] as { additionalContext?: string } | undefined;
     assert.ok(hso?.additionalContext, "a preempted victim's pre-read must carry additionalContext");
-    return hso.additionalContext;
+    const text = hso.additionalContext;
+
+    // Every assertion below depends on the fixture having actually preempted.
+    // A silent setup failure yields a small payload, which would make the
+    // guard pass vacuously and the overrun test fail for the wrong reason —
+    // so prove the three sections are present before measuring anything.
+    assert.match(text, /Post-compaction re-grounding/, "re-grounding co-tenant missing from the fixture");
+    assert.match(text, /⚠ Stale read/, "stale-read co-tenant missing from the fixture");
+    const bullets = text.split("\n").filter((l) => l.startsWith("  • "));
+    assert.equal(bullets.length, n, `expected ${n} notice bullets, got ${bullets.length}`);
+    return { text, bullets };
   } finally {
     await cleanup();
   }
@@ -115,13 +142,14 @@ test("composed additionalContext: a realistic preemption load stays under the ce
   // Python's own fixture size. Passes with wide headroom today; the value is
   // that it fires if ANY section — notices, the stale warning, re-grounding —
   // ever grows enough to threaten the composed ceiling in the common case.
-  const text = await composedContextAfterPreemptions(20, 60);
+  const { text } = await composedContextAfterPreemptions(20, 60);
   const bytes = Buffer.byteLength(text, "utf8");
   assert.ok(
     bytes <= COMPOSED_CONTEXT_CEILING_BYTES,
     `composed additionalContext should fit the ${COMPOSED_CONTEXT_CEILING_BYTES}-byte ceiling; got ${bytes}`,
   );
   // And it must actually be the multi-notice shape, or the guard is vacuous.
+  // (The helper already pinned the bullet count and all three co-tenants.)
   assert.match(text, /20 of your EXCLUSIVE grants/);
 });
 
@@ -133,15 +161,27 @@ test("KNOWN GAP (#138): the composed payload is unbounded and exceeds the ceilin
   // pinning it: the fix cannot land silently. When a composed-payload bound
   // exists, this assertion fails, and the author must flip it to `<=` and
   // fold it into the guard above — at which moment #138 closes.
-  const text = await composedContextAfterPreemptions(80, 60);
+  const { text, bullets } = await composedContextAfterPreemptions(80, 60);
   const bytes = Buffer.byteLength(text, "utf8");
+
+  // The helper already asserted all 80 bullets are present. That ordering is
+  // load-bearing: `bytes > ceiling` ALONE would stay green under a renderer
+  // capped at 79 notices, or under some OTHER section bloating while the
+  // notice render was fixed — both of which leave #138 open with CI passing.
+  // The overrun only counts as evidence of THIS defect if nothing was dropped.
   assert.ok(
     bytes > COMPOSED_CONTEXT_CEILING_BYTES,
-    `expected the KNOWN overrun (> ${COMPOSED_CONTEXT_CEILING_BYTES}); got ${bytes}. ` +
-      `If this now fits, the admit-path render has been bounded: invert this test and close #138.`,
+    `expected the KNOWN overrun (> ${COMPOSED_CONTEXT_CEILING_BYTES}) with all 80 notices ` +
+      `rendered; got ${bytes}. If this now fits, the admit-path render has been bounded: ` +
+      `invert this test, fold it into the guard above, and close #138.`,
   );
-  // The overrun is by whole notices, never by a mangled one: the last bullet
-  // must still be intact, so a future bound that drops WHOLE bullets and a
-  // platform that truncates at a byte offset are distinguishable.
-  assert.match(text, /docs\/plans\/[x0-9]+\.md preempted by session 2222/);
+
+  // The overrun is by whole notices, never by a mangled one, so a future bound
+  // that drops WHOLE bullets is distinguishable from a platform that truncates
+  // at a byte offset. Anchored to the LAST bullet specifically: an unanchored
+  // match is satisfied by any of the other 79 and would pass on a mangled tail.
+  assert.match(
+    bullets[bullets.length - 1] ?? "",
+    /^ {2}• docs\/plans\/[x0-9]+\.md preempted by session 2222\d{4} at \d{4}-\d{2}-\d{2}T[0-9:.+-]+$/,
+  );
 });
