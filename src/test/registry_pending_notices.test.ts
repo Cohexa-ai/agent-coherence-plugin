@@ -32,6 +32,7 @@ function makeRegistry(): { registry: ArtifactRegistry; cleanup: () => void } {
 
 const VICTIM = "a".repeat(32);
 const PREEMPTER = "b".repeat(32);
+const PREEMPTER_2 = "c".repeat(32);
 const HASH_1 = "1".repeat(64);
 
 /** Queue one notice for VICTIM on a fresh artifact, preempted at `ts`. */
@@ -87,6 +88,59 @@ test("popPendingNoticesForAgent returns the same order it deletes", () => {
       [3011, 3010, 3009, 3008, 3007, 3006, 3005, 3004, 3003, 3002, 3001, 3000],
     );
     assert.equal(registry.peekPendingNoticesForAgent(VICTIM).length, 0);
+  } finally {
+    cleanup();
+  }
+});
+
+test("a same-second re-preemption names the NEW preempter, not the first one", () => {
+  const { registry, cleanup } = makeRegistry();
+  try {
+    // The victim is preempted, re-arms, and is preempted again by a DIFFERENT
+    // session inside the same whole second. Timestamps are whole seconds
+    // (`nowUnix()` floors), so the two preemptions are indistinguishable by
+    // time — and the upsert's guard was a strict `>`, which declines an equal
+    // timestamp and leaves the row naming the session that is no longer the
+    // preempter. The rendered bullet then attributes the preemption to the
+    // wrong session, which is the operator's only record of who took the
+    // grant.
+    //
+    // Reachable on the strict-mode path specifically: `pre_bash.ts` re-grants
+    // SHARED, then returns the deny BEFORE `drainNoticeText`, so the row from
+    // the first preemption is still queued when the second one lands.
+    const id = registry.resolveOrRegisterArtifact("docs/plans/contended.md", HASH_1);
+    registry.grantShared(id, VICTIM, 5000);
+    registry.acquireExclusive(id, PREEMPTER, 5000);
+    registry.grantShared(id, VICTIM, 5000); // the strict-path re-arm
+    registry.acquireExclusive(id, PREEMPTER_2, 5000);
+
+    const notices = registry.peekPendingNoticesForAgent(VICTIM);
+    assert.equal(notices.length, 1, "one artifact must still mean one notice row");
+    assert.equal(
+      notices[0]?.preempterAgentId,
+      PREEMPTER_2,
+      "the notice must name the session that actually holds the grant now",
+    );
+  } finally {
+    cleanup();
+  }
+});
+
+test("an out-of-order older preemption still cannot overwrite a newer notice", () => {
+  const { registry, cleanup } = makeRegistry();
+  try {
+    // The guard the `>` was there for. Relaxing it to `>=` must keep this:
+    // a strictly OLDER timestamp is still refused, so only same-second
+    // last-write-wins changed.
+    const id = registry.resolveOrRegisterArtifact("docs/plans/ordered.md", HASH_1);
+    registry.grantShared(id, VICTIM, 7000);
+    registry.acquireExclusive(id, PREEMPTER, 7000);
+    registry.grantShared(id, VICTIM, 6000);
+    registry.acquireExclusive(id, PREEMPTER_2, 6000); // older: must not win
+
+    const notices = registry.peekPendingNoticesForAgent(VICTIM);
+    assert.equal(notices[0]?.preempterAgentId, PREEMPTER);
+    assert.equal(notices[0]?.preemptedAtUnixTs, 7000);
   } finally {
     cleanup();
   }
