@@ -183,16 +183,50 @@ if [ "$deps_changed" = "1" ] || [ "$native_stale" = "1" ]; then
   # --engine-strict turns the engines.node range into a hard install-time
   # gate (npm only warns by default), so the Stage-0 list above can never
   # silently drift past package.json.
-  if ! (cd "${CLAUDE_PLUGIN_DATA}" && npm install --engine-strict --no-audit --no-fund --no-progress 2>&1); then
+  # Capture as well as show, so the failure below can be CLASSIFIED rather
+  # than guessed at. PIPESTATUS[0] is npm's status; $? would be tee's.
+  npm_log="$(mktemp "${TMPDIR:-/tmp}/agent-coherence-npm.XXXXXX" 2>/dev/null || echo "")"
+  if [ -n "$npm_log" ]; then
+    (cd "${CLAUDE_PLUGIN_DATA}" && npm install --engine-strict --no-audit --no-fund --no-progress 2>&1) | tee "$npm_log"
+    npm_status=${PIPESTATUS[0]}
+  else
+    (cd "${CLAUDE_PLUGIN_DATA}" && npm install --engine-strict --no-audit --no-fund --no-progress 2>&1)
+    npm_status=$?
+  fi
+  if [ "$npm_status" -ne 0 ]; then
     rm -f "${CLAUDE_PLUGIN_DATA}/package.json"
     echo "agent-coherence: npm install failed; coordinator will not start this session. Next session retries." >&2
-    echo "agent-coherence: (a 'No prebuilt binaries found' / node-gyp trace above means this Node major" >&2
-    echo "agent-coherence: lacks a better-sqlite3 prebuilt — supported majors: 22 / 24 / 25.)" >&2
-    echo "agent-coherence: (an ESTRICTALLOWSCRIPTS error means npm 11 blocked an install script; the" >&2
-    echo "agent-coherence: allowScripts entry in package.json covers better-sqlite3's prebuilt fetch," >&2
-    echo "agent-coherence: so a NEW package there needs adding to it.)" >&2
+    # WHY CLASSIFY. All three failures below end in the same node-gyp
+    # "find Python" trace, because better-sqlite3 falls back to compiling
+    # whenever it cannot place a prebuilt binary -- for ANY reason. This
+    # block used to assert the first explanation unconditionally, which sent
+    # the reader to check their Node version even when the real cause was a
+    # dropped connection. prebuild-install logs the deciding fact itself:
+    # `log.warn('install', err.message)` (prebuild-install/bin.js:60,70), so
+    # the warn line carries "No prebuilt binaries found (target=...)" for a
+    # genuine ABI gap and the transport error otherwise.
+    if [ -n "$npm_log" ] && grep -qiE 'prebuild-install.+warn.+install.+No prebuilt binaries found' "$npm_log"; then
+      echo "agent-coherence: cause: this Node major has no better-sqlite3 prebuilt." >&2
+      echo "agent-coherence: supported majors are 22 / 24 / 25; running $(node -v 2>/dev/null || echo 'unknown')." >&2
+      echo "agent-coherence: retrying will not help — switch Node majors." >&2
+    elif [ -n "$npm_log" ] && grep -qiE 'prebuild-install.+warn.+install' "$npm_log"; then
+      echo "agent-coherence: cause: the prebuilt binary could not be DOWNLOADED (see the" >&2
+      echo "agent-coherence: 'prebuild-install warn install' line above — e.g. ECONNRESET). The" >&2
+      echo "agent-coherence: node-gyp trace after it is the fallback failing, not the cause, and" >&2
+      echo "agent-coherence: your Node major is fine. This is transient: RETRY." >&2
+    elif [ -n "$npm_log" ] && grep -q 'ESTRICTALLOWSCRIPTS' "$npm_log"; then
+      echo "agent-coherence: cause: npm 11 blocked an install script. The allowScripts entry in" >&2
+      echo "agent-coherence: package.json covers better-sqlite3's prebuilt fetch, so a NEW package" >&2
+      echo "agent-coherence: there needs adding to it." >&2
+    else
+      echo "agent-coherence: (no recognised cause in the npm output above. The usual three are a" >&2
+      echo "agent-coherence: missing prebuilt for this Node major, a failed prebuilt download, and" >&2
+      echo "agent-coherence: an ESTRICTALLOWSCRIPTS block on the install script.)" >&2
+    fi
+    rm -f "$npm_log"
     exit 1
   fi
+  rm -f "$npm_log"
   # Install-time verification. npm exiting 0 does NOT prove the native addon
   # arrived: better-sqlite3's install script IS the prebuilt download, so an
   # `ignore-scripts=true` in any npmrc suppresses it silently and yields a
