@@ -250,6 +250,9 @@ export async function handlePreRead(
  * Python `_build_preemption_text`.
  */
 function buildAdditionalNoticeText(deps: PreReadDeps, agentId: string): string | null {
+  // Renders every popped notice, uncapped, by decision — this pop DELETEs all of
+  // them, so a render-only cap would drop what it does not show. The reasoning
+  // and the measured numbers live on `preemptionNoticeText` in hook_payloads.ts.
   const popped = deps.registry.popPendingNoticesForAgent(agentId);
   if (popped.length === 0) return null;
   // Resolve artifact name + preempter session for each notice. Best-effort

@@ -135,6 +135,9 @@ export async function handlePreEdit(
 
   // Pop any pending notices for THIS session — they accumulated from prior
   // preemptions before this pre-edit. Merge into the response.
+  // Renders every popped notice, uncapped, by decision — this pop DELETEs all of
+  // them, so a render-only cap would drop what it does not show. The reasoning
+  // and the measured numbers live on `preemptionNoticeText` in hook_payloads.ts.
   const popped = deps.registry.popPendingNoticesForAgent(agentId);
   const noticeText =
     popped.length === 0
