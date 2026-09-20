@@ -39,7 +39,7 @@ import {
   SESSION_START_STALE_LINE_TEMPLATE,
   SESSION_START_TOUCHED_LINE_TEMPLATE,
   SESSION_START_OVERFLOW_LINE_TEMPLATE,
-  SESSION_START_NOTICE_OVERFLOW_LINE_TEMPLATE,
+  PREEMPTION_NOTICE_OVERFLOW_LINE_TEMPLATE,
   SESSION_START_SUBAGENT_PREFIX_TEMPLATE,
   SESSION_START_CLOSING_LINE,
 } from "../hook_payloads.js";
@@ -123,6 +123,21 @@ interface SessionStartContext {
 export function buildSessionStartContext(
   deps: SessionStartDeps,
   sessionId: string,
+  /**
+   * Whether to render this session's pending preemption notices.
+   *
+   * True for the real `/hooks/session-start` endpoint, which is the whole
+   * point of its notice block. FALSE for the deferred re-grounding seam,
+   * which rebuilds this prose at attach time onto an ADMIT response that has
+   * already drained and rendered notices of its own. Without this, the
+   * rebuild peeks whatever the admit drain left behind and emits a second
+   * notice block whose intro reports the REMAINING count — so the model reads
+   * two different revocation totals for one backlog, and sees rows the first
+   * block just promised for its next tracked-file operation. That second
+   * block also renders again on the next attach, because a peek consumes
+   * nothing.
+   */
+  includeNotices: boolean = true,
 ): SessionStartContext {
   const agents = deps.sessions.agentsForSession(sessionId);
 
@@ -200,7 +215,7 @@ export function buildSessionStartContext(
   // sees the same preemption surface on every channel. Artifact names come
   // from the same snapshot as the notice collection (one consistent pass).
   let noticeText: string | null = null;
-  if (notices.length > 0) {
+  if (includeNotices && notices.length > 0) {
     const artifactNameById = new Map(sortedArtifacts.map((a) => [a.id, a.name]));
     // R5 size bound: `notices` is flattened across the parent AND every
     // registered subagent, so it needs the same verbatim cap the artifact
@@ -234,7 +249,7 @@ export function buildSessionStartContext(
     const noticeOverflow = notices.length - verbatimNotices.length;
     if (noticeOverflow > 0) {
       noticeText +=
-        "\n" + fmt(SESSION_START_NOTICE_OVERFLOW_LINE_TEMPLATE, { count: String(noticeOverflow) });
+        "\n" + fmt(PREEMPTION_NOTICE_OVERFLOW_LINE_TEMPLATE, { count: String(noticeOverflow) });
     }
   }
 

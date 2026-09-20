@@ -20,7 +20,7 @@ import { ArtifactRegistry } from "../registry.js";
 import { PolicyRef } from "../policy.js";
 import { SessionRegistry } from "../sessions.js";
 import { createServer } from "../server.js";
-import { drainNoticeText } from "../hooks/pre_bash.js";
+import { drainNoticeText } from "../hooks/_common.js";
 import {
   emitAllow,
   emitStrictDeny,
@@ -177,7 +177,7 @@ test("warn renderers still shorten a REAL session id to 8 chars", () => {
 });
 
 test("drainNoticeText: an unresolved preempter keeps its <unknown> sentinel", () => {
-  // Drives the REAL call site (pre_bash.ts drainNoticeText, which pre_grep
+  // Drives the REAL call site (_common.ts drainNoticeText, which pre_grep
   // also uses), not the shortener. Calling shortSessionId directly here would
   // pass no matter what the call site does — the defect IS that the call site
   // sliced raw.

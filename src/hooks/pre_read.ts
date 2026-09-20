@@ -24,8 +24,6 @@ import {
   buildFreshWithNotice,
   emitStrictDeny,
   nowUnix,
-  preemptionNoticeText,
-  shortSessionId,
   type StaleSummary,
 } from "../hook_payloads.js";
 
@@ -34,14 +32,15 @@ const F_SENTINEL_CONTENT_HASH = "f".repeat(64);
 /** Survivor #6 R2: self-commit → disk-flush lag window (Python `_SHARED_FOREIGN_DENY_LAG_WINDOW_SEC`). */
 const SHARED_FOREIGN_DENY_LAG_WINDOW_SEC = 5.0;
 import {
-  type HookDeps,
-  writeJson,
-  writeError,
-  readJsonBody,
-  isValidSessionId,
-  isValidPath,
+  drainNoticeText,
   isValidContentHashOrAbsent,
+  isValidPath,
+  isValidSessionId,
+  readJsonBody,
   readSubagentId,
+  type HookDeps,
+  writeError,
+  writeJson,
 } from "./_common.js";
 import { deliverPendingReground, writeFastAdmit } from "./reground.js";
 
@@ -105,7 +104,7 @@ export async function handlePreRead(
     deps.registry.grantShared(artifactId, agentId, nowTick, "first_read");
     // Even on first observation, check if THIS session has pending notices
     // from prior interactions on OTHER artifacts.
-    const notice = buildAdditionalNoticeText(deps, agentId);
+    const notice = drainNoticeText(deps, agentId);
     if (notice !== null) {
       writeJson(res, 200, withReground(buildFreshWithNotice(notice)));
       return;
@@ -171,7 +170,7 @@ export async function handlePreRead(
     }
     // Reader has a valid grant (SHARED, EXCLUSIVE, or MODIFIED) on the
     // current version. Fresh.
-    const notice = buildAdditionalNoticeText(deps, agentId);
+    const notice = drainNoticeText(deps, agentId);
     if (notice !== null) {
       writeJson(res, 200, withReground(buildFreshWithNotice(notice)));
       return;
@@ -235,7 +234,7 @@ export async function handlePreRead(
   const resp = buildStaleResponse(summary);
   // A1: if THIS session has pending preemption notices, prepend them to the
   // additionalContext.
-  const notice = buildAdditionalNoticeText(deps, agentId);
+  const notice = drainNoticeText(deps, agentId);
   if (notice !== null) {
     resp.hookSpecificOutput.additionalContext =
       notice + "\n\n" + resp.hookSpecificOutput.additionalContext;
@@ -244,30 +243,6 @@ export async function handlePreRead(
   writeJson(res, 200, withReground(resp));
 }
 
-/**
- * Pop pending-preemption notices for the given agent and render them as
- * additional-context prose. Returns null if no notices pending. Mirrors
- * Python `_build_preemption_text`.
- */
-function buildAdditionalNoticeText(deps: PreReadDeps, agentId: string): string | null {
-  // Renders every popped notice, uncapped, by decision — this pop DELETEs all of
-  // them, so a render-only cap would drop what it does not show. The reasoning
-  // and the measured numbers live on `preemptionNoticeText` in hook_payloads.ts.
-  const popped = deps.registry.popPendingNoticesForAgent(agentId);
-  if (popped.length === 0) return null;
-  // Resolve artifact name + preempter session for each notice. Best-effort
-  // — if either is unknown, fall back to "<unknown>".
-  const rendered = popped.map((n) => {
-    const art = deps.registry.getArtifactById(n.artifactId);
-    const preempterSession = deps.sessions.agentIdToSessionId(n.preempterAgentId) ?? "<unknown>";
-    return {
-      artifactPath: art?.name ?? "<unknown-artifact>",
-      preempterSessionShort: shortSessionId(preempterSession),
-      preemptedAtUnixTs: n.preemptedAtUnixTs,
-    };
-  });
-  return preemptionNoticeText(rendered);
-}
 
 /** Parse + dispatch helper for use from server.ts. */
 export async function preReadRoute(

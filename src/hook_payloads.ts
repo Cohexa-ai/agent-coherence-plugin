@@ -295,55 +295,47 @@ export function editCollisionWarning(
 /**
  * Render pending preemption notices as admit-path prose.
  *
- * WHY THE ADMIT CALLERS ARE UNCAPPED, and why that is a decision rather than an
- * omission. Python's `_build_preemption_text` caps its verbatim render, so the
- * obvious read of this one is a missing port. It is not.
+ * THE ADMIT CALLERS ARE NOW BOUNDED. They drain through `drainNoticeText`
+ * (src/hooks/_common.ts), which passes `ADMIT_NOTICE_VERBATIM_CAP` to
+ * `popPendingNoticesForAgent` and coalesces the remainder into one line.
  *
- * The four admit callers pop via `popPendingNoticesForAgent`, and that DELETEs
- * every row for the agent before returning them. Capping the RENDER without
- * capping the DRAIN therefore destroys the difference rather than deferring it.
- * Python can cap safely because it pairs the bound with
- * `pop_pending_notices(consume_limit=)` AND has `evict_stale_notices` behind it;
- * Node has neither, and that DELETE is the only row-removal path in the whole
- * coordinator -- no timer, no TTL, no sweep, no session-stop drain, and the
- * `ON DELETE CASCADE` on `pending_notices` never fires because nothing deletes
- * an artifact. A bounded consume here would trade bounded prose for unbounded
- * rows.
+ * This block previously argued at length that they were deliberately
+ * uncapped, on the grounds that the pop DELETEs every row before returning,
+ * so capping the RENDER would destroy the difference rather than defer it.
+ * That reasoning was sound and it is what a render-only bound (PR #150) got
+ * wrong. What it missed is that Python does not cap the render either: it
+ * bounds the CONSUME. `pop_pending_notices(consume_limit=)` deletes only the
+ * slice the caller renders and returns the whole queue, so the tail stays in
+ * the table and the intro still reports a true total. Node's registry now
+ * does the same, which is why the bound is safe here without the TTL sweep
+ * the old argument said was a prerequisite: nothing is dropped, so nothing
+ * needs reclaiming for correctness. Rows for an agent that never returns do
+ * linger -- bounded by `PRIMARY KEY (agent_id, artifact_id)`, so by the
+ * tracked-artifact count -- and a session-stop drain is the cheap backstop if
+ * that ever matters.
  *
- * The hazard is nonetheless real, which is why this is an OPEN residual and not
- * a settled one: on a workspace of this project's size a full uncapped drain
- * renders roughly 1.8x the 10,000-byte additionalContext ceiling.
+ * What the bound achieved, measured end-to-end on /hooks/pre-read: at 80
+ * notices with 60-char paths the composed additionalContext went from 11,037
+ * bytes to 2,022, and is now independent of the notice COUNT.
  *
- * That ceiling is the PLATFORM's, not a house convention: Claude Code routes
+ * What it does NOT bound is path length. Every bullet carries a path, and the
+ * composed payload renders notice bullets twice -- once here and again inside
+ * the deferred re-grounding block, which is rebuilt at attach time and peeks
+ * whatever this drain left. At ~700+ character paths that still breaches the
+ * ceiling; `src/test/composed_context_budget.test.ts` pins it as a RESIDUAL
+ * with the measurements. No real tracked path approaches that.
+ *
+ * The ceiling is the PLATFORM's, not a house convention: Claude Code routes
  * every hook's `additionalContext` through one helper that returns the string
  * unchanged only while `length <= 1e4`, and above it persists the prose to a
  * file and hands the model a 2,000-byte preview plus a path. The derivation
  * and the exact bundle symbols are recorded on the constant in
- * src/test/composed_context_budget.test.ts, which is the admit-path
- * assertion; src/test/session_start.test.ts:336, :583 assert the same figure
- * for session-start. Note the platform counts UTF-16 code units and both
- * tests count UTF-8 bytes, which is the stricter direction on this prose.
+ * src/test/composed_context_budget.test.ts.
  *
- * That ratio is the durable part. Do not add a notice COUNT here: bullet size
- * scales with path length, and any threshold expressed as "N notices" also
- * depends on the order notices arrive in, so a point value measured once reads
- * as a constant and is not one. An earlier revision of this comment shipped
- * exactly that mistake three times over. Cohexa-ai/agent-coherence-plugin#138
- * carries the measurements, the method that produces them, and the costing of a
- * fix -- all of which go stale and belong somewhere staleness is expected.
- *
- * What bounds the pile-up: `PRIMARY KEY (agent_id, artifact_id)` caps notices
- * per agent at the tracked-artifact count, and a notice is recorded only for a
- * peer holding a non-INVALID grant (registry.ts:379-381), which preemption then
- * clears -- so notices accumulate only between two of the victim's OWN hooks.
- *
- * The path where counts actually multiply is already handled: session-start
- * flattens notices across the parent AND every registered subagent, and it DOES
- * cap. That is safe there because session-start PEEKS instead of popping, so
- * nothing it declines to render is lost. Admit paths cannot borrow the trick:
- * each derives its own agentId from the composite (session, subagent) identity
- * and drains only that agent, and consumption there is load-bearing -- the next
- * hook must not re-emit what this one showed.
+ * Do not add a notice COUNT to this comment as a threshold: bullet size scales
+ * with path length, so any "N notices" figure is a point value that reads as a
+ * constant and is not one. Cohexa-ai/agent-coherence-plugin#138 carries the
+ * measurements and the method that reproduces them.
  */
 export function preemptionNoticeText(
   notices: ReadonlyArray<{
@@ -356,8 +348,11 @@ export function preemptionNoticeText(
    * capped slice of them (SB-10's session-start block does). The intro
    * counts what the operator HAS, not how many bullets fit — reporting the
    * slice length would tell them three grants were revoked when forty were.
-   * Defaults to `notices.length`, so the uncapped admit-path callers keep
-   * their exact bytes.
+   * Defaults to `notices.length` for a caller that renders everything it was
+   * given. Both capped callers pass it explicitly: session-start at
+   * `session_start.ts` and the shared admit drain `drainNoticeText` in
+   * `hooks/_common.ts`, which passes the whole queue's length while
+   * rendering only `ADMIT_NOTICE_VERBATIM_CAP` of it.
    */
   totalCount: number = notices.length,
 ): string {
@@ -481,9 +476,14 @@ export const SESSION_START_OVERFLOW_LINE_TEMPLATE =
  * survive and reach the model on the next tracked-file admit; this says that
  * instead. Mirrors Python's `_build_preemption_text`, which dropped the same
  * /status pointer for the same reason.
+ *
+ * The leading `  • ` is load-bearing, not decoration: this line closes a
+ * bulleted list and Python's counterpart carries the same marker
+ * (`_build_preemption_text`, coordinator_server.py). Without it the block
+ * ends in an unbulleted orphan on every surface that renders it.
  */
-export const SESSION_START_NOTICE_OVERFLOW_LINE_TEMPLATE =
-  "Plus {count} more preemptions since your last activity, still queued — " +
+export const PREEMPTION_NOTICE_OVERFLOW_LINE_TEMPLATE =
+  "  • Plus {count} more preemptions since your last activity, still queued — " +
   "they surface on your next tracked-file operation.";
 
 /**

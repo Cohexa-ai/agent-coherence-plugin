@@ -22,18 +22,17 @@ import {
   buildCollisionResponse,
   emitStrictDeny,
   nowUnix,
-  preemptionNoticeText,
-  shortSessionId,
   type StaleSummary,
 } from "../hook_payloads.js";
 import {
-  type HookDeps,
-  writeJson,
-  writeError,
-  readJsonBody,
-  isValidSessionId,
+  drainNoticeText,
   isValidPath,
+  isValidSessionId,
+  readJsonBody,
   readSubagentId,
+  type HookDeps,
+  writeError,
+  writeJson,
 } from "./_common.js";
 import { deliverPendingReground, writeFastAdmit } from "./reground.js";
 
@@ -134,26 +133,9 @@ export async function handlePreEdit(
   }
 
   // Pop any pending notices for THIS session — they accumulated from prior
-  // preemptions before this pre-edit. Merge into the response.
-  // Renders every popped notice, uncapped, by decision — this pop DELETEs all of
-  // them, so a render-only cap would drop what it does not show. The reasoning
-  // and the measured numbers live on `preemptionNoticeText` in hook_payloads.ts.
-  const popped = deps.registry.popPendingNoticesForAgent(agentId);
-  const noticeText =
-    popped.length === 0
-      ? null
-      : preemptionNoticeText(
-          popped.map((n) => {
-            const art = deps.registry.getArtifactById(n.artifactId);
-            const preempterSession =
-              deps.sessions.agentIdToSessionId(n.preempterAgentId) ?? "<unknown>";
-            return {
-              artifactPath: art?.name ?? "<unknown-artifact>",
-              preempterSessionShort: shortSessionId(preempterSession),
-              preemptedAtUnixTs: n.preemptedAtUnixTs,
-            };
-          }),
-        );
+  // preemptions before this pre-edit. Bounded and rendered by the one shared
+  // drain in _common.ts, which deletes only what it renders.
+  const noticeText = drainNoticeText(deps, agentId);
 
   // If we silently preempted someone in M/E, surface a collision warning.
   // Per Python convention: permissionDecision stays "allow" in v0.1.1 warn-only;
