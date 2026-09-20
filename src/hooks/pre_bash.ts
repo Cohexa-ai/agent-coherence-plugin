@@ -43,6 +43,9 @@ interface PreBashBody {
 
 /** Drain + render this agent's pending preemption notices (mirrors pre_read's helper). */
 export function drainNoticeText(deps: HookDeps, agentId: string): string | null {
+  // Renders every popped notice, uncapped, by decision — this pop DELETEs all of
+  // them, so a render-only cap would drop what it does not show. The reasoning
+  // and the measured numbers live on `preemptionNoticeText` in hook_payloads.ts.
   const popped = deps.registry.popPendingNoticesForAgent(agentId);
   if (popped.length === 0) return null;
   const rendered = popped.map((n) => {

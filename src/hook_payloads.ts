@@ -292,6 +292,48 @@ export function editCollisionWarning(
  * grant was silently revoked by a peer. Mirrors Python's
  * `_build_preemption_text`.
  */
+/**
+ * Render pending preemption notices as admit-path prose.
+ *
+ * WHY THE ADMIT-PATH CALLERS ARE UNCAPPED, and why that is a decision rather
+ * than an omission. This has been re-derived three times; the numbers are here
+ * so it is not re-derived a fourth.
+ *
+ * Python's `_build_preemption_text` caps its verbatim render and coalesces the
+ * rest, so the obvious read is that Node is simply missing the port. It is not,
+ * and porting the cap alone would make things worse:
+ *
+ *   - The four admit callers (pre_read, pre_edit, pre_bash; pre_grep reuses
+ *     pre_bash) call `popPendingNoticesForAgent`, and that DELETEs every row
+ *     for the agent (registry.ts) before returning them. Capping the RENDER
+ *     without capping the DRAIN destroys the difference: forty deleted, three
+ *     shown, thirty-seven gone with nothing to surface them.
+ *   - Python can cap safely because it passes the same bound as
+ *     `pop_pending_notices(consume_limit=...)` AND has `evict_stale_notices`
+ *     behind it. Node has neither. The DELETE in `popPendingNoticesForAgent`
+ *     is the ONLY row-removal path in this coordinator: no timer, no TTL, no
+ *     sweep, no session-stop notice drain, and although `pending_notices`
+ *     declares `ON DELETE CASCADE` from `artifacts`, nothing ever deletes an
+ *     artifact, so it never fires. A bounded consume here would trade bounded
+ *     prose for unbounded rows.
+ *
+ * And the hazard it would buy is small. `PRIMARY KEY (agent_id, artifact_id)`
+ * bounds notices per agent by the TRACKED-ARTIFACT COUNT, and measured against
+ * this renderer it takes 113 of them -- all preempted from one agent between
+ * two of that agent's own hooks -- to pass Claude Code's 10KB additionalContext
+ * ceiling (112 -> 10155 bytes, 113 -> 10246).
+ *
+ * The path where counts actually multiply is already handled: session-start
+ * flattens notices across the parent AND every registered subagent, and it DOES
+ * cap (SESSION_START_ARTIFACT_VERBATIM_CAP, newest-first, with an overflow
+ * line). That is safe there because session-start PEEKS instead of popping, so
+ * nothing it declines to render is lost.
+ *
+ * Revisit if either premise moves: real workspaces approaching ~100 tracked
+ * artifacts, or session-stop gaining a notice drain that could act as the
+ * reclaimer a bounded consume needs. Tracked as the open residual on
+ * Cohexa-ai/agent-coherence-plugin#138.
+ */
 export function preemptionNoticeText(
   notices: ReadonlyArray<{
     artifactPath: string;
