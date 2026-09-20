@@ -295,94 +295,46 @@ export function editCollisionWarning(
 /**
  * Render pending preemption notices as admit-path prose.
  *
- * WHY THE ADMIT-PATH CALLERS ARE UNCAPPED, and why that is a decision rather
- * than an omission. This has been re-derived three times; the numbers are here
- * so it is not re-derived a fourth.
+ * WHY THE ADMIT CALLERS ARE UNCAPPED, and why that is a decision rather than an
+ * omission. Python's `_build_preemption_text` caps its verbatim render, so the
+ * obvious read of this one is a missing port. It is not.
  *
- * Python's `_build_preemption_text` caps its verbatim render and coalesces the
- * rest, so the obvious read is that Node is simply missing the port. It is not,
- * and porting the cap alone would make things worse:
+ * The four admit callers pop via `popPendingNoticesForAgent`, and that DELETEs
+ * every row for the agent before returning them. Capping the RENDER without
+ * capping the DRAIN therefore destroys the difference rather than deferring it.
+ * Python can cap safely because it pairs the bound with
+ * `pop_pending_notices(consume_limit=)` AND has `evict_stale_notices` behind it;
+ * Node has neither, and that DELETE is the only row-removal path in the whole
+ * coordinator -- no timer, no TTL, no sweep, no session-stop drain, and the
+ * `ON DELETE CASCADE` on `pending_notices` never fires because nothing deletes
+ * an artifact. A bounded consume here would trade bounded prose for unbounded
+ * rows.
  *
- *   - The four admit callers (pre_read, pre_edit, pre_bash; pre_grep reuses
- *     pre_bash) call `popPendingNoticesForAgent`, and that DELETEs every row
- *     for the agent (registry.ts) before returning them. Capping the RENDER
- *     without capping the DRAIN destroys the difference: forty deleted, three
- *     shown, thirty-seven gone with nothing to surface them.
- *   - Python can cap safely because it passes the same bound as
- *     `pop_pending_notices(consume_limit=...)` AND has `evict_stale_notices`
- *     behind it. Node has neither. The DELETE in `popPendingNoticesForAgent`
- *     is the ONLY row-removal path in this coordinator: no timer, no TTL, no
- *     sweep, no session-stop notice drain, and although `pending_notices`
- *     declares `ON DELETE CASCADE` from `artifacts`, nothing ever deletes an
- *     artifact, so it never fires. A bounded consume here would trade bounded
- *     prose for unbounded rows.
+ * The hazard is nonetheless real, which is why this is an OPEN residual and not
+ * a settled one: on a workspace of this project's size a full uncapped drain
+ * renders roughly 1.8x the 10,000-byte additionalContext ceiling this repo
+ * asserts (src/test/session_start.test.ts:336, :583).
  *
- * HOW BIG IS THE HAZARD. An earlier revision of this comment priced it at "113
- * notices" and called that remote. That was wrong twice over, and the numbers
- * below replace it. METHOD, recorded so this is reproducible rather than
- * trusted: classify a workspace's files with this repo's own `globMatch` +
- * DEFAULT_TRACKED_PATTERNS (not a hand-rolled find, and not `git ls-files` --
- * the coordinator matches PATHS ON DISK and never consults git, so a gitignored
- * working doc is still tracked), then feed those paths through
- * `preemptionNoticeText` with WHOLE-SECOND timestamps. Fractional timestamps
- * make `pythonIsoUtc` append microseconds and inflate every bullet by 7 bytes.
+ * That ratio is the durable part. Do not add a notice COUNT here: bullet size
+ * scales with path length, and any threshold expressed as "N notices" also
+ * depends on the order notices arrive in, so a point value measured once reads
+ * as a constant and is not one. An earlier revision of this comment shipped
+ * exactly that mistake three times over. Cohexa-ai/agent-coherence-plugin#138
+ * carries the measurements, the method that produces them, and the costing of a
+ * fix -- all of which go stale and belong somewhere staleness is expected.
  *
- * The ceiling to measure against is 10,000, which is what this repo's own tests
- * assert (src/test/session_start.test.ts:336, :583) -- not the 10,240 the old
- * revision used, under which its own "112 -> 10155" row already breached.
- *
- * Measured that way against the sibling repo at the time of writing: 134 tracked
- * paths, mean length 67 characters, a full uncapped drain of 17,843 bytes --
- * about 1.8x the ceiling -- and a crossover at 75 notices. A cap of three
- * renders 402 bytes for that same set.
- *
- * Treat the counts as workspace-specific, not as constants. Bullet size is
- * dominated by path length, so a project with shorter paths crosses later and
- * one with longer paths sooner; the intro line also changes shape between the
- * one-notice and many-notice wordings. Re-measure by the method above rather
- * than quoting these figures for a different tree.
- *
- * `PRIMARY KEY (agent_id, artifact_id)` still bounds notices per agent by the
- * tracked-artifact count, and a notice is only recorded for a peer holding a
- * non-INVALID grant (registry.ts:379-381), which preemption then clears -- so
- * the pile-up window is between two of the victim's OWN hooks. Reaching 75 needs
- * a peer preempting that many of one agent's live grants inside that window: a
- * bulk edit pass across tracked docs does it, routine work does not. Real, not
- * routine.
+ * What bounds the pile-up: `PRIMARY KEY (agent_id, artifact_id)` caps notices
+ * per agent at the tracked-artifact count, and a notice is recorded only for a
+ * peer holding a non-INVALID grant (registry.ts:379-381), which preemption then
+ * clears -- so notices accumulate only between two of the victim's OWN hooks.
  *
  * The path where counts actually multiply is already handled: session-start
  * flattens notices across the parent AND every registered subagent, and it DOES
- * cap (SESSION_START_ARTIFACT_VERBATIM_CAP, newest-first, with an overflow
- * line). That is safe there because session-start PEEKS instead of popping, so
- * nothing it declines to render is lost. Admit paths cannot borrow that trick:
+ * cap. That is safe there because session-start PEEKS instead of popping, so
+ * nothing it declines to render is lost. Admit paths cannot borrow the trick:
  * each derives its own agentId from the composite (session, subagent) identity
- * and drains only that agent, so subagent fan-out multiplies AGENTS rather than
- * notices-per-agent -- and consumption there is load-bearing, since the next
+ * and drains only that agent, and consumption there is load-bearing -- the next
  * hook must not re-emit what this one showed.
- *
- * WHAT A FIX COSTS, so the next reader does not have to price it again. Three
- * coupled parts, not one: (1) a bounded consume mirroring Python's
- * `pop_pending_notices(consume_limit=)`, ~30 lines -- and Node's ordering is the
- * SAFER side here, because the admit callers never re-sort, so the rendered set
- * equals the deleted set by construction; (2) a reclaimer for the deferred
- * remainder, cheapest as a session-stop notice drain (~25 lines; Python has one
- * at coordinator_server.py:2411, and its comment there names the exact orphan
- * case -- a victim whose next action is a Bash/Grep, or whose turn simply ends);
- * (3) anti-starvation, because `upsertPendingNotice`'s ON CONFLICT refreshes
- * `preempted_at_unix_ts` and the queue orders by it DESC, so a re-preempted
- * artifact returns to the HEAD and a bounded consume can starve a cold tail that
- * Python's TTL would age out. Note that guard is a strict `>` over WHOLE-SECOND
- * ticks, so a same-second re-preemption does NOT refresh the row: it stays cold
- * AND keeps the earlier preempter's id. Plus ~15 tests. Handing the remainder
- * back in a response `notices` array is NOT a fourth option: non-
- * hookSpecificOutput keys are telemetry, never model context, so that converts
- * deferred into destroyed.
- *
- * The trigger this comment used to name -- "workspaces approaching ~100 tracked
- * artifacts" -- has already fired. It is open on
- * Cohexa-ai/agent-coherence-plugin#138 as justified but unimplemented, gated on
- * whether Node's notice render should converge on Python's bytes, which is a
- * separate undecided question a cap must not settle by accident.
  */
 export function preemptionNoticeText(
   notices: ReadonlyArray<{
