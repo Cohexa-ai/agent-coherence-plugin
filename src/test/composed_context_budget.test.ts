@@ -2,7 +2,8 @@
  * The composed `additionalContext` byte budget on an admit path.
  *
  * WHY THIS FILE EXISTS. Python asserts its composed admit payload at
- * `<= 10240` bytes (tests/test_claude_code_coordinator_server.py:1025).
+ * `<= 10240` bytes (tests/test_claude_code_coordinator_server.py:1025) — a
+ * figure that is itself 240 bytes too generous, see the constant below.
  * Node had no equivalent, and that gap is what let a proposed fix ship a
  * notice-block bound (PR #150) whose COMPOSED payload still measured ~10.5 KB
  * — the bound was on one section, but the ceiling applies to the whole
@@ -39,20 +40,38 @@ import { createServer } from "../server.js";
 const SECRET = "s".repeat(32);
 
 /**
- * The ceiling Python asserts for the composed admit payload
- * (tests/test_claude_code_coordinator_server.py:1025). Not a Node constant —
- * Node has none, which is the gap this file records — so it is stated here as
- * the contract these tests hold the payload to.
+ * The ceiling is 10,000, and it is the PLATFORM's, not this repo's.
  *
- * This repo states a SECOND, tighter ceiling of `< 10_000` for the
- * session-start payload (src/test/session_start.test.ts:336, :583), and that
- * is not an inconsistency introduced here: Python carries both too, 10240 for
- * the composed admit payload at :1025 and 10_000 for session-start at :3857.
- * The admit path and session-start are different surfaces with different
- * co-tenants; this file mirrors the admit-path figure because that is the
- * surface it measures.
+ * Every hook's `additionalContext` is passed through one function in the
+ * Claude Code bundle before it reaches the model:
+ *
+ *   async function kee(e, r, n, {threshold: s = xJr, storageV5: a} = {}) {
+ *     if (e.length <= s) return e;              // under: delivered verbatim
+ *     let o = await B$(e, `hook-${r}-${n}`, w_(), a);   // over: to disk
+ *     ...
+ *   }
+ *
+ * with `xJr = 1e4`. Both `additionalContext` call sites pass no `threshold`,
+ * so the default applies. Over it the prose is persisted to a file and the
+ * model receives a 2,000-byte preview plus a path instead of the notice —
+ * not a truncation, but not the coherence prose either. (A separate
+ * aggregate budget, `oqt = uir * $_e` = 25000 * 4, governs batched dispatch
+ * and is not this limit.)
+ *
+ * Two consequences worth stating, because both were previously guessed:
+ *
+ *   - The platform compares `e.length`, i.e. UTF-16 code units. These tests
+ *     compare UTF-8 BYTES, which for this prose (`⚠`, `•`, `—` are all
+ *     multi-byte) is the STRICTER measure. That is deliberate: erring tight
+ *     is safe, erring loose is not.
+ *   - 10,240 is 10 KiB where the platform means 10,000. An earlier revision
+ *     of this comment rationalised the 10,240/10,000 split as a principled
+ *     difference between the admit and session-start surfaces. There is no
+ *     such difference — both surfaces go through `kee` with the same default.
+ *     `src/test/session_start.test.ts:336`, `:583` already assert the right
+ *     number; this file was the outlier, and Python's `<= 10240` still is.
  */
-const COMPOSED_CONTEXT_CEILING_BYTES = 10_240;
+const COMPOSED_CONTEXT_CEILING_BYTES = 10_000;
 
 async function makeServer() {
   const tmp = mkdtempSync(join(tmpdir(), "composed-ctx-"));
