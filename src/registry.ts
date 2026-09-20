@@ -959,8 +959,20 @@ export class ArtifactRegistry {
   /**
    * UPSERT a preemption notice. PRIMARY KEY (agent_id, artifact_id) means a
    * second preemption on the same (victim, artifact) replaces the prior
-   * notice — latest preempter wins (matches Python sqlite_registry.py:937
-   * `INSERT … ON CONFLICT DO UPDATE WHERE excluded.preempted_at_unix_ts > …`).
+   * notice — latest preempter wins (matches Python's `pop_pending_notices`
+   * sibling in `sqlite_registry.record_preemption_notice`).
+   *
+   * The guard is `>=`, not `>`. Timestamps here are WHOLE SECONDS, so two
+   * preemptions of the same pair inside one second are indistinguishable by
+   * time, and a strict `>` declines the second — leaving the row naming a
+   * session that no longer holds the grant, which is the opposite of the
+   * "latest preempter wins" contract above. `>=` makes it last-write-wins
+   * within a second while still refusing a strictly OLDER timestamp, which
+   * is the only thing the comparison was ever load-bearing for.
+   *
+   * Reachable on the strict-mode path: `pre_bash`/`pre_grep` re-grant SHARED
+   * and then return the deny BEFORE draining notices, so the first row is
+   * still queued when a second preempter arrives in the same second.
    */
   private upsertPendingNotice(
     victimAgentId: string,
@@ -975,7 +987,7 @@ export class ArtifactRegistry {
          ON CONFLICT(agent_id, artifact_id) DO UPDATE
            SET preempter_agent_id = excluded.preempter_agent_id,
                preempted_at_unix_ts = excluded.preempted_at_unix_ts
-           WHERE excluded.preempted_at_unix_ts > pending_notices.preempted_at_unix_ts`,
+           WHERE excluded.preempted_at_unix_ts >= pending_notices.preempted_at_unix_ts`,
       )
       .run(victimAgentId, artifactId, preempterAgentId, nowUnixTs);
   }
