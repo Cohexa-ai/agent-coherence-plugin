@@ -37,6 +37,7 @@ import { PolicyRef } from "../policy.js";
 import { SessionRegistry } from "../sessions.js";
 import { createServer } from "../server.js";
 import { ADMIT_NOTICE_VERBATIM_CAP } from "../hooks/_common.js";
+import { sessionToAgentId } from "../agent_id.js";
 
 const SECRET = "s".repeat(32);
 
@@ -262,10 +263,27 @@ test("BOUNDED (#138): a pile-up that used to blow the ceiling now fits, with an 
     assert.match(h.text, /Plus 77 more preemptions since your last activity, still queued/);
     // Whole bullets, never a mangled one: a bound that drops WHOLE notices is
     // distinguishable from a platform that truncates at a byte offset.
-    assert.match(
-      h.bullets[h.bullets.length - 1] ?? "",
-      /^ {2}• docs\/plans\/[x0-9]+\.md preempted by session 2222\d{4} at \d{4}-\d{2}-\d{2}T[0-9:.+-]+$/,
+    // R7 moved the identity this names from the preempter's SESSION id to its
+    // agent id, so the old `2222dddd` pin no longer matches anything. Keeping
+    // only a shape check would have made this an "it printed something"
+    // assertion, so the attacker agent ids are derived here and the bullet has
+    // to name one of them -- and the raw session prefix has to be absent.
+    const attackerAgentPrefixes = new Set(
+      Array.from({ length: 80 }, (_, i) =>
+        sessionToAgentId(`2222${String(i).padStart(4, "0")}-2222-4222-8222-222222222222`).slice(0, 8),
+      ),
     );
+    const lastBullet = h.bullets[h.bullets.length - 1] ?? "";
+    const named =
+      /^ {2}• docs\/plans\/[x0-9]+\.md preempted by agent ([0-9a-f]{8}) at \d{4}-\d{2}-\d{2}T[0-9:.+-]+$/.exec(
+        lastBullet,
+      );
+    assert.ok(named, `expected a whole, well-formed bullet; got: ${lastBullet}`);
+    assert.ok(
+      attackerAgentPrefixes.has(named[1]),
+      `the bullet named ${named[1]}, which is no attacker's agent id; got: ${lastBullet}`,
+    );
+    assert.doesNotMatch(lastBullet, /2222\d{4}/);
   } finally {
     await h.cleanup();
   }

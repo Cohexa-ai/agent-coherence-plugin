@@ -94,16 +94,18 @@ export async function handlePreBash(
     }
     staleSummaries.push({ path, current_version: existing.version });
     if (strictStaleFirst === null && deps.policy.isStrictMode(path)) {
-      const lastWriterSession =
-        existing.last_writer_id !== null
-          ? deps.sessions.agentIdToSessionId(existing.last_writer_id)
-          : null;
+      // R7: the registry's handle for the writer, not a recovered session id.
+      const lastWriterAgent = existing.last_writer_id;
       strictStaleFirst = {
         path,
         current_version: existing.version,
+        // R8: the observed version, not the inferred one -- see pre_read.ts.
         prior_version_seen_by_session:
-          agentState === MESIState.INVALID ? existing.version - 1 : null,
-        last_writer_session_id: lastWriterSession ?? "<unknown>",
+          agentState === MESIState.INVALID
+            ? (deps.registry.lastObservedVersionFor(existing.id, agentId) ??
+              (existing.version > 0 ? existing.version - 1 : 0))
+            : null,
+        last_writer_session_id: lastWriterAgent ?? "<unknown>",
         last_writer_at_unix_ts: existing.updated_at,
         warning_generated_at_unix_ts: nowUnix(),
         hash_differs: false,

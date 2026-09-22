@@ -234,10 +234,14 @@ export function drainNoticeText(deps: HookDeps, agentId: string): string | null 
   const verbatim = all.slice(0, ADMIT_NOTICE_VERBATIM_CAP);
   const rendered = verbatim.map((n) => {
     const art = deps.registry.getArtifactById(n.artifactId);
-    const preempterSession = deps.sessions.agentIdToSessionId(n.preempterAgentId) ?? "<unknown>";
+    // R7: the notice row already carries the preempter's agent id -- the
+    // handle the registry stores and /status publishes. Rendering it directly
+    // also removes the restart degradation the reverse lookup had: the
+    // session map is process-local and starts empty, so a preempter that
+    // survived a restart used to render "<unknown>".
     return {
       artifactPath: art?.name ?? "<unknown-artifact>",
-      preempterSessionShort: shortSessionId(preempterSession),
+      preempterAgentShort: shortSessionId(n.preempterAgentId),
       preemptedAtUnixTs: n.preemptedAtUnixTs,
     };
   });
