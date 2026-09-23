@@ -22,12 +22,14 @@ import {
 } from "../hook_payloads.js";
 import { detectTrackedPaths } from "./bash_path_detector.js";
 import {
+  applyRegrants,
   drainNoticeText,
   isValidSessionId,
   nowTick as nowTickFn,
   readJsonBody,
   readSubagentId,
   type HookDeps,
+  type Regrant,
   writeError,
   writeJson,
 } from "./_common.js";
@@ -80,12 +82,17 @@ export async function handlePreBash(
   // whole command (multi-path commands re-deny with the next path's reason
   // on retry, bounded by the model's own retry loop — mirrors Python).
   let strictStaleFirst: StaleSummary | null = null;
+  // The SHARED grants this command earns, applied only once the deny decision
+  // is known — see applyRegrants.
+  const regrants: Regrant[] = [];
   for (const path of trackedPaths) {
     const existing = deps.registry.getArtifactByName(path);
     if (existing === null) {
-      // First observation per KTD-9 — seed v1 + SHARED so subsequent reads are fresh.
+      // First observation per KTD-9 — seed v1 + SHARED so subsequent reads are
+      // fresh. detectTrackedPaths deduplicates, so deferring the grant cannot
+      // make a later iteration read this path as stale.
       const artifactId = deps.registry.resolveOrRegisterArtifact(path, "");
-      deps.registry.grantShared(artifactId, agentId, now, "first_bash_read");
+      regrants.push({ artifactId, trigger: "first_bash_read" });
       continue;
     }
     const agentState = deps.registry.getAgentState(existing.id, agentId);
@@ -113,8 +120,10 @@ export async function handlePreBash(
     }
     // Re-grant SHARED to suppress repeat fires (warn-mode contract; Python
     // pre-bash re-grants even on the strict path — the deny fires this once).
-    deps.registry.grantShared(existing.id, agentId, now, "post_stale_bash");
+    regrants.push({ artifactId: existing.id, trigger: "post_stale_bash" });
   }
+
+  applyRegrants(deps, agentId, regrants, { commandRuns: strictStaleFirst === null, nowTick: now });
 
   if (strictStaleFirst !== null) {
     writeJson(res, 200, {

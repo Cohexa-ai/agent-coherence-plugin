@@ -252,3 +252,35 @@ export function drainNoticeText(deps: HookDeps, agentId: string): string | null 
   }
   return text;
 }
+
+/** One SHARED grant a Bash / Grep command earns on one tracked path. */
+export interface Regrant {
+  artifactId: string;
+  trigger: string;
+}
+
+/**
+ * Grant SHARED on every path a Bash / Grep command named, AFTER the deny
+ * decision, and record an observation only if the command will run. Node twin
+ * of Python `_apply_bash_grep_regrants`.
+ *
+ * The grant is the same either way: strict pre-bash / pre-grep deny once and
+ * re-arm the session, so a retry of the command goes through. What depends on
+ * the decision is the OBSERVATION: a denied command never ran, so crediting
+ * it told a session that a later grant handover left it at "the version you
+ * last saw", a version it was refused. An allowed command does run and does
+ * read the current bytes, like pre-read's post-stale re-grant, so it keeps
+ * recording. Keyed on the COMMAND's outcome, not the trigger and not the
+ * path's own strictness: a warn-only path inside a denied command was not
+ * read either.
+ */
+export function applyRegrants(
+  deps: HookDeps,
+  agentId: string,
+  regrants: readonly Regrant[],
+  opts: { commandRuns: boolean; nowTick: number },
+): void {
+  for (const { artifactId, trigger } of regrants) {
+    deps.registry.grantShared(artifactId, agentId, opts.nowTick, trigger, opts.commandRuns);
+  }
+}

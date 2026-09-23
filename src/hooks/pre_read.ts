@@ -190,8 +190,12 @@ export async function handlePreRead(
   // claim, because `current > prior` then held unconditionally.
   // `agent_states.last_observed_version` is written with every non-INVALID
   // grant and PRESERVED across the transition to INVALID. The old inference
-  // survives only as the fallback for a row written before the v4 migration
-  // added the column. Mirrors Python `_prior_version_observed`.
+  // survives only as the fallback for a NULL value: a row written before the
+  // v4 migration added the column, or a row whose only grant certified no read
+  // (the agent's first grant on the path came from a DENIED Bash/Grep command —
+  // see applyRegrants). `version - 1` is always below current, so either case takes
+  // the write wording and asks for a re-read. Mirrors Python
+  // `_prior_version_observed`.
   const priorSeen =
     agentState === MESIState.INVALID
       ? (deps.registry.lastObservedVersionFor(artifactId, agentId) ??

@@ -22,6 +22,7 @@ import { SessionRegistry } from "../sessions.js";
 import { createServer } from "../server.js";
 import { drainNoticeText } from "../hooks/_common.js";
 import { sessionToAgentId } from "../agent_id.js";
+import { MESIState } from "../states.js";
 import {
   emitAllow,
   emitStrictDeny,
@@ -616,4 +617,234 @@ test("drainNoticeText: the preempter is named from the notice row, with no looku
   assert.ok(text);
   assert.match(text, /preempted by agent d7f57e87 at 2025-05-24T12:00:00\+00:00/);
   assert.doesNotMatch(text, TRUNCATED_SENTINEL);
+});
+
+// ------------------------------------------- a denied read is not an observation
+
+/**
+ * pre-bash and pre-grep re-grant SHARED to every stale path they name, on the
+ * strict path too: the deny fires once and the retry goes through. A SHARED
+ * grant used to be an observation, full stop, so a DENIED `cat plan.md` —
+ * which never ran — credited the session with the version it was refused.
+ * When a peer then took the grant without committing, the summary compared
+ * that invented baseline against an unchanged version and said nothing had
+ * been written since "the version you last saw".
+ *
+ * The allowed twin is NOT a bug and must stay: the command runs and reads the
+ * current bytes. The key is the COMMAND's outcome — not the trigger, not the
+ * path's own strictness. Every pair below pins both directions; the Python
+ * twins live in tests/integration/test_strict_mode.py.
+ */
+const STRICT_PATH = "plan.md";
+const WARN_PATH = "docs/plans/x.md";
+const SEED_PATH = "CLAUDE.md"; // tracked by default, never registered below
+
+/** A observed v1, then B committed v2: A is INVALID at observed 1. */
+function staleForA(
+  registry: ArtifactRegistry,
+  sessions: SessionRegistry,
+  path: string,
+): { id: string; agentA: string; agentB: string } {
+  const id = registry.resolveOrRegisterArtifact(path, HASH_1);
+  const agentA = sessions.registerSession(SID_A);
+  const agentB = sessions.registerSession(SID_B);
+  registry.grantShared(id, agentA, 1);
+  registry.acquireExclusive(id, agentB, 2);
+  registry.commit(id, agentB, HASH_2, 3);
+  assert.equal(registry.getAgentState(id, agentA), MESIState.INVALID);
+  assert.equal(registry.lastObservedVersionFor(id, agentA), 1);
+  return { id, agentA, agentB };
+}
+
+/** B takes the grant again and writes nothing — asserted, so the read after
+ * it cannot silently take the fresh arm. */
+function handOverWithoutCommit(
+  registry: ArtifactRegistry,
+  ids: { id: string; agentA: string; agentB: string },
+): void {
+  const before = registry.getArtifactById(ids.id)?.version;
+  registry.acquireExclusive(ids.id, ids.agentB, 10);
+  assert.equal(registry.getAgentState(ids.id, ids.agentA), MESIState.INVALID);
+  assert.equal(registry.getArtifactById(ids.id)?.version, before);
+}
+
+test("denied pre-bash: the grant is re-armed but the baseline does NOT advance", async () => {
+  const { registry, sessions, post, cleanup } = await makeStrictServer([STRICT_PATH]);
+  try {
+    const ids = staleForA(registry, sessions, STRICT_PATH);
+    const r = await post("/hooks/pre-bash", { session_id: SID_A, command: `cat ${STRICT_PATH}` });
+    assert.equal(decision(r), "deny");
+    assert.equal(registry.lastObservedVersionFor(ids.id, ids.agentA), 1);
+    assert.equal(registry.getAgentState(ids.id, ids.agentA), MESIState.SHARED);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("denied pre-bash then a grant handover: the deny still reports the write A never read", async () => {
+  const { registry, sessions, post, cleanup } = await makeStrictServer([STRICT_PATH]);
+  try {
+    const ids = staleForA(registry, sessions, STRICT_PATH);
+    await post("/hooks/pre-bash", { session_id: SID_A, command: `cat ${STRICT_PATH}` });
+    handOverWithoutCommit(registry, ids);
+
+    const r = await post("/hooks/pre-read", { session_id: SID_A, path: STRICT_PATH });
+    assert.equal(decision(r), "deny");
+    const reason = (r.hookSpecificOutput as Record<string, string>).permissionDecisionReason;
+    assert.match(reason, /plan\.md was updated by agent /);
+    assert.doesNotMatch(reason, /no new version was committed/);
+    const summary = r.summary as Record<string, unknown>;
+    assert.equal(summary.current_version, 2);
+    assert.equal(summary.prior_version_seen_by_session, 1);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("allowed pre-bash: the command runs, so the baseline DOES advance and the handover wording stays", async () => {
+  const { registry, sessions, post, cleanup } = await makeStrictServer([STRICT_PATH]);
+  try {
+    const ids = staleForA(registry, sessions, WARN_PATH);
+    const r = await post("/hooks/pre-bash", { session_id: SID_A, command: `cat ${WARN_PATH}` });
+    assert.equal(decision(r), "allow");
+    assert.equal(registry.lastObservedVersionFor(ids.id, ids.agentA), 2);
+
+    handOverWithoutCommit(registry, ids);
+    const read = await post("/hooks/pre-read", { session_id: SID_A, path: WARN_PATH });
+    assert.equal(decision(read), "allow");
+    const text = (read.hookSpecificOutput as Record<string, string>).additionalContext;
+    assert.match(text, /your grant on docs\/plans\/x\.md was revoked and no new version was committed/);
+    assert.match(text, /the version you last saw/);
+    assert.doesNotMatch(text, /was updated by/);
+    assert.equal((read.summary as Record<string, unknown>).prior_version_seen_by_session, 2);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("a warn path inside a DENIED bash command is not observed either", async () => {
+  const { registry, sessions, post, cleanup } = await makeStrictServer([STRICT_PATH]);
+  try {
+    const strictIds = staleForA(registry, sessions, STRICT_PATH);
+    const warnIds = staleForA(registry, sessions, WARN_PATH);
+    const r = await post("/hooks/pre-bash", {
+      session_id: SID_A,
+      command: `cat ${STRICT_PATH} ${WARN_PATH}`,
+    });
+    assert.equal(decision(r), "deny");
+    assert.equal(registry.lastObservedVersionFor(strictIds.id, strictIds.agentA), 1);
+    assert.equal(registry.lastObservedVersionFor(warnIds.id, warnIds.agentA), 1);
+    assert.equal(registry.getAgentState(warnIds.id, warnIds.agentA), MESIState.SHARED);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("first observation inside a DENIED bash command records no observation; inside an allowed one it does", async () => {
+  const denied = await makeStrictServer([STRICT_PATH]);
+  try {
+    staleForA(denied.registry, denied.sessions, STRICT_PATH);
+    const r = await denied.post("/hooks/pre-bash", {
+      session_id: SID_A,
+      command: `cat ${STRICT_PATH} ${SEED_PATH}`,
+    });
+    assert.equal(decision(r), "deny");
+    const seeded = denied.registry.getArtifactByName(SEED_PATH);
+    assert.ok(seeded, "the seed path is registered either way");
+    const agentA = sessionToAgentId(SID_A);
+    assert.equal(denied.registry.getAgentState(seeded.id, agentA), MESIState.SHARED);
+    assert.equal(denied.registry.lastObservedVersionFor(seeded.id, agentA), null);
+  } finally {
+    await denied.cleanup();
+  }
+
+  const allowed = await makeStrictServer([STRICT_PATH]);
+  try {
+    staleForA(allowed.registry, allowed.sessions, WARN_PATH);
+    const r = await allowed.post("/hooks/pre-bash", {
+      session_id: SID_A,
+      command: `cat ${WARN_PATH} ${SEED_PATH}`,
+    });
+    assert.equal(decision(r), "allow");
+    const seeded = allowed.registry.getArtifactByName(SEED_PATH);
+    assert.ok(seeded);
+    assert.equal(allowed.registry.lastObservedVersionFor(seeded.id, sessionToAgentId(SID_A)), 1);
+  } finally {
+    await allowed.cleanup();
+  }
+});
+
+test("denied pre-grep does NOT advance the baseline; allowed pre-grep does", async () => {
+  const denied = await makeStrictServer([STRICT_PATH]);
+  try {
+    const ids = staleForA(denied.registry, denied.sessions, STRICT_PATH);
+    const r = await denied.post("/hooks/pre-grep", { session_id: SID_A, search_root: "" });
+    assert.equal(decision(r), "deny");
+    assert.equal(denied.registry.lastObservedVersionFor(ids.id, ids.agentA), 1);
+    assert.equal(denied.registry.getAgentState(ids.id, ids.agentA), MESIState.SHARED);
+  } finally {
+    await denied.cleanup();
+  }
+
+  const allowed = await makeStrictServer([STRICT_PATH]);
+  try {
+    const ids = staleForA(allowed.registry, allowed.sessions, WARN_PATH);
+    const r = await allowed.post("/hooks/pre-grep", {
+      session_id: SID_A,
+      search_root: "docs/plans",
+    });
+    assert.equal(decision(r), "allow");
+    assert.equal(allowed.registry.lastObservedVersionFor(ids.id, ids.agentA), 2);
+  } finally {
+    await allowed.cleanup();
+  }
+});
+
+test("control: an allowed stale pre-read still advances the baseline", async () => {
+  const { registry, sessions, post, cleanup } = await makeStrictServer([STRICT_PATH]);
+  try {
+    const ids = staleForA(registry, sessions, WARN_PATH);
+    const r = await post("/hooks/pre-read", {
+      session_id: SID_A,
+      path: WARN_PATH,
+      content_hash: HASH_2,
+    });
+    assert.equal(decision(r), "allow");
+    assert.equal(registry.lastObservedVersionFor(ids.id, ids.agentA), 2);
+  } finally {
+    await cleanup();
+  }
+});
+
+async function regroundText(
+  post: (path: string, body: unknown) => Promise<Record<string, unknown>>,
+): Promise<string> {
+  const r = await post("/hooks/session-start", { session_id: SID_A });
+  return (r.hookSpecificOutput as Record<string, string>).additionalContext;
+}
+
+test("denied pre-bash keeps the post-compaction stale flag (the baseline's other reader)", async () => {
+  const { registry, sessions, post, cleanup } = await makeStrictServer([STRICT_PATH]);
+  try {
+    const ids = staleForA(registry, sessions, STRICT_PATH);
+    await post("/hooks/pre-bash", { session_id: SID_A, command: `cat ${STRICT_PATH}` });
+    handOverWithoutCommit(registry, ids);
+    assert.match(await regroundText(post), /plan\.md advanced to v2 past your last-observed v1/);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("allowed pre-bash raises no false post-compaction stale flag", async () => {
+  const { registry, sessions, post, cleanup } = await makeStrictServer([STRICT_PATH]);
+  try {
+    const ids = staleForA(registry, sessions, WARN_PATH);
+    await post("/hooks/pre-bash", { session_id: SID_A, command: `cat ${WARN_PATH}` });
+    handOverWithoutCommit(registry, ids);
+    const text = await regroundText(post);
+    assert.match(text, /docs\/plans\/x\.md is at v2\./);
+    assert.doesNotMatch(text, /advanced to/);
+  } finally {
+    await cleanup();
+  }
 });

@@ -11,6 +11,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { MESIState } from "../states.js";
 import { emitStrictDeny, nowUnix, type StaleSummary } from "../hook_payloads.js";
 import {
+  applyRegrants,
   drainNoticeText,
   isValidPath,
   isValidSessionId,
@@ -18,6 +19,7 @@ import {
   readJsonBody,
   readSubagentId,
   type HookDeps,
+  type Regrant,
   writeError,
   writeJson,
 } from "./_common.js";
@@ -66,6 +68,7 @@ export async function handlePreGrep(
 
   const staleSummaries: Array<{ path: string; current_version: number }> = [];
   let strictStaleFirst: StaleSummary | null = null;
+  const regrants: Regrant[] = [];
   for (const path of trackedPaths) {
     const existing = deps.registry.getArtifactByName(path);
     if (existing === null) continue; // no seeding on the grep path
@@ -90,8 +93,10 @@ export async function handlePreGrep(
         hash_differs: false,
       };
     }
-    deps.registry.grantShared(existing.id, agentId, now, "post_stale_grep");
+    regrants.push({ artifactId: existing.id, trigger: "post_stale_grep" });
   }
+
+  applyRegrants(deps, agentId, regrants, { commandRuns: strictStaleFirst === null, nowTick: now });
 
   // v0.2 KTD-Q strict short-circuit — same shape as pre-bash (Unit 6).
   if (strictStaleFirst !== null) {
