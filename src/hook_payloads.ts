@@ -366,9 +366,8 @@ function grantChangeWarning(summary: StaleSummary): string {
   return (
     `⚠ Stale read [warning emitted ${generatedTs}]: your grant on ${path} ` +
     `was revoked and no new version was committed. ${path} is still at ` +
-    `v${summary.current_version}, the version you last saw, and your ` +
-    `worktree's content still matches the coordinator's last-recorded ` +
-    `hash. Re-acquire before writing to ${path}.`
+    `v${summary.current_version}, the version you last saw. ` +
+    `Re-acquire before writing to ${path}.`
   );
 }
 

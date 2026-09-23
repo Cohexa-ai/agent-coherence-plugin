@@ -565,9 +565,8 @@ test("staleReadWarning: a grant handover reports no write and names the unchange
     text,
     "⚠ Stale read [warning emitted 2025-05-24T12:00:01+00:00]: your " +
       "grant on docs/plan.md was revoked and no new version was committed. " +
-      "docs/plan.md is still at v1, the version you last saw, and your " +
-      "worktree's content still matches the coordinator's last-recorded " +
-      "hash. Re-acquire before writing to docs/plan.md.",
+      "docs/plan.md is still at v1, the version you last saw. " +
+      "Re-acquire before writing to docs/plan.md.",
   );
   assert.equal(text.includes("was updated by"), false);
 });
