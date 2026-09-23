@@ -22,12 +22,14 @@ import {
 } from "../hook_payloads.js";
 import { detectTrackedPaths } from "./bash_path_detector.js";
 import {
+  applyRegrants,
   drainNoticeText,
   isValidSessionId,
   nowTick as nowTickFn,
   readJsonBody,
   readSubagentId,
   type HookDeps,
+  type Regrant,
   writeError,
   writeJson,
 } from "./_common.js";
@@ -80,12 +82,17 @@ export async function handlePreBash(
   // whole command (multi-path commands re-deny with the next path's reason
   // on retry, bounded by the model's own retry loop — mirrors Python).
   let strictStaleFirst: StaleSummary | null = null;
+  // The SHARED grants this command earns, applied only once the deny decision
+  // is known — see applyRegrants.
+  const regrants: Regrant[] = [];
   for (const path of trackedPaths) {
     const existing = deps.registry.getArtifactByName(path);
     if (existing === null) {
-      // First observation per KTD-9 — seed v1 + SHARED so subsequent reads are fresh.
+      // First observation per KTD-9 — seed v1 + SHARED so subsequent reads are
+      // fresh. detectTrackedPaths deduplicates, so deferring the grant cannot
+      // make a later iteration read this path as stale.
       const artifactId = deps.registry.resolveOrRegisterArtifact(path, "");
-      deps.registry.grantShared(artifactId, agentId, now, "first_bash_read");
+      regrants.push({ artifactId, trigger: "first_bash_read" });
       continue;
     }
     const agentState = deps.registry.getAgentState(existing.id, agentId);
@@ -94,16 +101,18 @@ export async function handlePreBash(
     }
     staleSummaries.push({ path, current_version: existing.version });
     if (strictStaleFirst === null && deps.policy.isStrictMode(path)) {
-      const lastWriterSession =
-        existing.last_writer_id !== null
-          ? deps.sessions.agentIdToSessionId(existing.last_writer_id)
-          : null;
+      // R7: the registry's handle for the writer, not a recovered session id.
+      const lastWriterAgent = existing.last_writer_id;
       strictStaleFirst = {
         path,
         current_version: existing.version,
+        // R8: the observed version, not the inferred one -- see pre_read.ts.
         prior_version_seen_by_session:
-          agentState === MESIState.INVALID ? existing.version - 1 : null,
-        last_writer_session_id: lastWriterSession ?? "<unknown>",
+          agentState === MESIState.INVALID
+            ? (deps.registry.lastObservedVersionFor(existing.id, agentId) ??
+              (existing.version > 0 ? existing.version - 1 : 0))
+            : null,
+        last_writer_session_id: lastWriterAgent ?? "<unknown>",
         last_writer_at_unix_ts: existing.updated_at,
         warning_generated_at_unix_ts: nowUnix(),
         hash_differs: false,
@@ -111,8 +120,10 @@ export async function handlePreBash(
     }
     // Re-grant SHARED to suppress repeat fires (warn-mode contract; Python
     // pre-bash re-grants even on the strict path — the deny fires this once).
-    deps.registry.grantShared(existing.id, agentId, now, "post_stale_bash");
+    regrants.push({ artifactId: existing.id, trigger: "post_stale_bash" });
   }
+
+  applyRegrants(deps, agentId, regrants, { commandRuns: strictStaleFirst === null, nowTick: now });
 
   if (strictStaleFirst !== null) {
     writeJson(res, 200, {

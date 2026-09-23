@@ -233,14 +233,14 @@ export function buildSessionStartContext(
     const verbatimNotices = newestFirst.slice(0, SESSION_START_ARTIFACT_VERBATIM_CAP);
     noticeText = preemptionNoticeText(
       verbatimNotices.map((n) => {
-        const preempterSession = deps.sessions.agentIdToSessionId(n.preempterAgentId) ?? "<unknown>";
         return {
           artifactPath: artifactNameById.get(n.artifactId) ?? "<unknown-artifact>",
           // Raw preempter id, not the resolved session: the prose builder
           // matches it against the sweep-reclamation sentinel so a coordinator
           // sweep is named as such rather than rendered as a peer session.
           preempterAgentId: n.preempterAgentId,
-          preempterSessionShort: shortSessionId(preempterSession),
+          // R7: the agent id, not a session id recovered from it.
+          preempterAgentShort: shortSessionId(n.preempterAgentId),
           preemptedAtUnixTs: n.preemptedAtUnixTs,
         };
       }),

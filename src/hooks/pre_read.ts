@@ -132,16 +132,16 @@ export async function handlePreRead(
       deps.policy.isStrictMode(path)
     ) {
       const now = nowUnix();
-      const lastWriterSession =
-        existingArtifact.last_writer_id !== null
-          ? deps.sessions.agentIdToSessionId(existingArtifact.last_writer_id)
-          : null;
+      // R7: name the writer by the agent id the registry stores, not by the
+      // session id that id was derived from.
+      const lastWriterAgent = existingArtifact.last_writer_id;
       // P1: compare the raw writer identity against THIS caller's composite
-      // agentId — NOT agentIdToSessionId(...) vs the parent session_id. Since
-      // SB-25 made the reverse lookup return a subagent's bare attribution id,
-      // the old session-string comparison could never match for a subagent's
-      // own commit, so its immediate self-re-read was wrongly denied as a
-      // "foreign edit." (lastWriterSession is kept only for the summary field.)
+      // agentId — NOT the session id the writer's agent id was derived from.
+      // SB-25 made that (now removed, R7) reverse lookup return a subagent's
+      // bare attribution id, so the old session-string comparison could never
+      // match for a subagent's own commit and its immediate self-re-read was
+      // wrongly denied as a "foreign edit." (lastWriterAgent is kept only for
+      // the summary field.)
       const isSelfCommitLag =
         existingArtifact.last_writer_id === agentId &&
         now - existingArtifact.updated_at <= SHARED_FOREIGN_DENY_LAG_WINDOW_SEC;
@@ -151,7 +151,7 @@ export async function handlePreRead(
           current_version: existingArtifact.version,
           // A SHARED holder was granted on the current version.
           prior_version_seen_by_session: existingArtifact.version,
-          last_writer_session_id: lastWriterSession ?? "<unknown>",
+          last_writer_session_id: lastWriterAgent ?? "<unknown>",
           last_writer_at_unix_ts: existingArtifact.updated_at,
           warning_generated_at_unix_ts: now,
           hash_differs: true,
@@ -181,11 +181,25 @@ export async function handlePreRead(
 
   // Stale: either first time this session sees the artifact OR they were
   // invalidated by a peer commit.
+  // R8: the version this agent last ACTUALLY observed. This used to be
+  // inferred as `version - 1`, which is only correct if the invalidation came
+  // from a commit; when a peer merely TAKES the grant
+  // (Cohexa-ai/agent-coherence#196) the version does not move, so the
+  // inference reported a version the session never saw and made an unchanged
+  // version look changed -- which is also what hid the false "was updated by"
+  // claim, because `current > prior` then held unconditionally.
+  // `agent_states.last_observed_version` is written with every non-INVALID
+  // grant and PRESERVED across the transition to INVALID. The old inference
+  // survives only as the fallback for a NULL value: a row written before the
+  // v4 migration added the column, or a row whose only grant certified no read
+  // (the agent's first grant on the path came from a DENIED Bash/Grep command —
+  // see applyRegrants). `version - 1` is always below current, so either case takes
+  // the write wording and asks for a re-read. Mirrors Python
+  // `_prior_version_observed`.
   const priorSeen =
     agentState === MESIState.INVALID
-      ? existingArtifact.version > 0
-        ? existingArtifact.version - 1
-        : 0
+      ? (deps.registry.lastObservedVersionFor(artifactId, agentId) ??
+        (existingArtifact.version > 0 ? existingArtifact.version - 1 : 0))
       : null;
 
   // hash_differs: caller's current Read content vs registry's last-recorded hash.
@@ -194,10 +208,9 @@ export async function handlePreRead(
     existingArtifact.content_hash !== "" &&
     contentHash !== existingArtifact.content_hash;
 
-  // Resolve last writer to session_id if known; else "<unknown>" prefix.
-  const lastWriterAgentId = existingArtifact.last_writer_id;
-  const lastWriterSessionId =
-    lastWriterAgentId !== null ? deps.sessions.agentIdToSessionId(lastWriterAgentId) ?? "<unknown>" : "<unknown>";
+  // R7: the registry's own handle for the writer; "<unknown>" only when
+  // nothing has been committed.
+  const lastWriterSessionId = existingArtifact.last_writer_id ?? "<unknown>";
 
   const summary: StaleSummary = {
     path,

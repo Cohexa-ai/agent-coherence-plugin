@@ -234,10 +234,14 @@ export function drainNoticeText(deps: HookDeps, agentId: string): string | null 
   const verbatim = all.slice(0, ADMIT_NOTICE_VERBATIM_CAP);
   const rendered = verbatim.map((n) => {
     const art = deps.registry.getArtifactById(n.artifactId);
-    const preempterSession = deps.sessions.agentIdToSessionId(n.preempterAgentId) ?? "<unknown>";
+    // R7: the notice row already carries the preempter's agent id -- the
+    // handle the registry stores and /status publishes. Rendering it directly
+    // also removes the restart degradation the reverse lookup had: the
+    // session map is process-local and starts empty, so a preempter that
+    // survived a restart used to render "<unknown>".
     return {
       artifactPath: art?.name ?? "<unknown-artifact>",
-      preempterSessionShort: shortSessionId(preempterSession),
+      preempterAgentShort: shortSessionId(n.preempterAgentId),
       preemptedAtUnixTs: n.preemptedAtUnixTs,
     };
   });
@@ -247,4 +251,36 @@ export function drainNoticeText(deps: HookDeps, agentId: string): string | null 
     text += "\n" + PREEMPTION_NOTICE_OVERFLOW_LINE_TEMPLATE.replace("{count}", String(overflow));
   }
   return text;
+}
+
+/** One SHARED grant a Bash / Grep command earns on one tracked path. */
+export interface Regrant {
+  artifactId: string;
+  trigger: string;
+}
+
+/**
+ * Grant SHARED on every path a Bash / Grep command named, AFTER the deny
+ * decision, and record an observation only if the command will run. Node twin
+ * of Python `_apply_bash_grep_regrants`.
+ *
+ * The grant is the same either way: strict pre-bash / pre-grep deny once and
+ * re-arm the session, so a retry of the command goes through. What depends on
+ * the decision is the OBSERVATION: a denied command never ran, so crediting
+ * it told a session that a later grant handover left it at "the version you
+ * last saw", a version it was refused. An allowed command does run and does
+ * read the current bytes, like pre-read's post-stale re-grant, so it keeps
+ * recording. Keyed on the COMMAND's outcome, not the trigger and not the
+ * path's own strictness: a warn-only path inside a denied command was not
+ * read either.
+ */
+export function applyRegrants(
+  deps: HookDeps,
+  agentId: string,
+  regrants: readonly Regrant[],
+  opts: { commandRuns: boolean; nowTick: number },
+): void {
+  for (const { artifactId, trigger } of regrants) {
+    deps.registry.grantShared(artifactId, agentId, opts.nowTick, trigger, opts.commandRuns);
+  }
 }

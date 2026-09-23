@@ -202,6 +202,41 @@ test("re-grant after invalidation re-records the (newer) current version", () =>
   }
 });
 
+test("grantShared(observed=false) grants but keeps the prior value; the default still records", () => {
+  // Both directions on the very same transition: asserting only the preserve
+  // side cannot tell a working flag from a registry that stopped recording.
+  const { registry, cleanup } = makeRegistry();
+  try {
+    const id = registry.resolveOrRegisterArtifact("plan.md", HASH_1);
+    registry.grantShared(id, AGENT_A, 10);
+    registry.acquireExclusive(id, AGENT_B, 20);
+    registry.commit(id, AGENT_B, HASH_2, 30); // v2; A INVALID, observed 1
+    assert.equal(registry.getAgentState(id, AGENT_A), MESIState.INVALID);
+
+    registry.grantShared(id, AGENT_A, 40, "post_stale_bash", false);
+    assert.equal(registry.getAgentState(id, AGENT_A), MESIState.SHARED);
+    assert.equal(registry.lastObservedVersionFor(id, AGENT_A), 1);
+
+    registry.acquireExclusive(id, AGENT_B, 50); // A INVALID again, still at 1
+    registry.grantShared(id, AGENT_A, 60, "post_stale_bash");
+    assert.equal(registry.lastObservedVersionFor(id, AGENT_A), 2);
+  } finally {
+    cleanup();
+  }
+});
+
+test("grantShared(observed=false) on a never-observed pair records nothing", () => {
+  const { registry, cleanup } = makeRegistry();
+  try {
+    const id = registry.resolveOrRegisterArtifact("plan.md", HASH_1);
+    registry.grantShared(id, AGENT_A, 10, "first_bash_read", false);
+    assert.equal(registry.getAgentState(id, AGENT_A), MESIState.SHARED);
+    assert.equal(registry.lastObservedVersionFor(id, AGENT_A), null);
+  } finally {
+    cleanup();
+  }
+});
+
 // ------------------------------------------------------------------
 // Commit paths advance the committer (R6)
 // ------------------------------------------------------------------

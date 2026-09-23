@@ -20,7 +20,22 @@
 export interface StaleSummary {
   path: string;
   current_version: number;
+  /**
+   * The version this session last actually OBSERVED, read from the
+   * registry's per-agent `last_observed_version` rather than inferred as
+   * `current_version - 1`. The inference assumed the invalidation came from
+   * a commit; when a peer merely took the grant it reported a version the
+   * session never saw and made an unchanged version look changed
+   * (Cohexa-ai/agent-coherence#196). `null` = never observed.
+   */
   prior_version_seen_by_session: number | null;
+  /**
+   * The writer's AGENT id (`artifacts.last_writer_id`), or the literal
+   * `<unknown>` when nothing has been committed. Named for the session id it
+   * used to carry; the wire key is kept so hook scripts, the CLI and the
+   * recorded corpus keep parsing by exact shape. R7: this used to be the
+   * session id, recovered by running `sessionToAgentId` backwards.
+   */
   last_writer_session_id: string;
   last_writer_at_unix_ts: number;
   warning_generated_at_unix_ts: number;
@@ -115,12 +130,67 @@ export const TERMINAL_DENIAL_CLASSES: ReadonlySet<string> = new Set([
  * WORSENS opus retry behavior (5 retries vs 2); every substitution is
  * deterministic per-artifact / per-preempter / per-commit-tick. Do not
  * reword, respace, or add fields.
+ *
+ * R7 reworded it once, "session" → "agent", in the same change on both
+ * backends: `last_writer_short` shortens an AGENT id now, because the
+ * registry stores `artifacts.last_writer_id` as one and the response renders
+ * it as-is instead of mapping it back to the session id it was derived from.
+ * Byte-stability is a property of the same inputs producing the same bytes,
+ * which a one-time reword landed on both sides does not disturb.
  */
 export const STRICT_MODE_DENY_REASON_TEMPLATE =
-  "Stale read denied: {path} was updated by session {last_writer_short} " +
+  "Stale read denied: {path} was updated by agent {last_writer_short} " +
   "at {last_writer_ts_iso}. Re-read {path} via the Read tool before " +
   "proceeding. This denial is structural (v0.2 strict mode); retrying " +
   "the same operation will produce the same denial.";
+
+/**
+ * The deny text for the arm where nothing was written (R8) — BYTE-IDENTICAL
+ * to the Python `GRANT_CHANGE_DENY_REASON_TEMPLATE`.
+ *
+ * Cohexa-ai/agent-coherence#196: a peer's `pre-edit` invalidates a live
+ * holder WITHOUT committing. The holder's next read was denied with "was
+ * updated by session <unknown> at <t>" — a write that never happened, named
+ * against a writer that does not exist, at a timestamp when nothing was
+ * written. `summaryReportsAWrite` picks between the two templates.
+ *
+ * Carries no timestamp at all: a revocation the summary can see has no event
+ * tick of its own (`last_writer_at_unix_ts` is the last real commit, which is
+ * not what happened here), and the version is the honest thing to report.
+ * That makes this arm byte-stable for the same reason the other one is.
+ */
+export const GRANT_CHANGE_DENY_REASON_TEMPLATE =
+  "Stale read denied: your grant on {path} was revoked and no new version " +
+  "was committed \u2014 {path} is still at v{current_version}. Re-read " +
+  "{path} via the Read tool before proceeding. This denial is structural " +
+  "(v0.2 strict mode); retrying the same operation will produce the same " +
+  "denial.";
+
+/**
+ * Does this summary support the claim that the artifact was WRITTEN?
+ * Mirrors Python `hook_payloads.summary_reports_a_write` exactly.
+ *
+ * Three admitting cases, one refusing one:
+ * - `prior_version_seen_by_session === null` — the session never observed
+ *   this artifact, so there is no grant of its own that could have changed
+ *   hands and no baseline to call unchanged.
+ * - `hash_differs` — the bytes the caller just hashed differ from the
+ *   coordinator's recorded content. Something was written, in-band or out.
+ * - `current_version > prior_version_seen_by_session` — a commit landed.
+ *
+ * Otherwise the version this session observed is still the current one and
+ * its bytes still match: nothing was written, and the only thing that moved
+ * is the grant. Both branches are pinned by tests, because a predicate
+ * asserted only in the admitting direction is indistinguishable from one
+ * that always admits — which is what the single template this replaces
+ * effectively was.
+ */
+export function summaryReportsAWrite(summary: StaleSummary): boolean {
+  const prior = summary.prior_version_seen_by_session;
+  if (prior === null) return true;
+  if (summary.hash_differs) return true;
+  return summary.current_version > prior;
+}
 
 /**
  * Python `datetime.fromtimestamp(ts, tz=utc).isoformat()` semantics —
@@ -168,18 +238,18 @@ export function emitAllow(args: {
 }
 
 /**
- * The 8-char short form of a session id, EXCEPT for a `<...>` sentinel.
+ * The 8-char short form of an identity handle, EXCEPT for a `<...>` sentinel.
  *
  * A placeholder like `"<unknown>"` is prose, not an identifier: slicing it to
  * 8 chars drops the closing angle bracket and ships malformed text
- * ("<unknown"). Real session ids are 36-char UUIDs, so an 8-char prefix is
- * unambiguous whenever one is present. Every renderer that shortens a session
- * id for prose goes through here — the guard used to live in `emitStrictDeny`
+ * ("<unknown"). Real handles are 36-char session UUIDs or 32-char agent-id
+ * hex, so an 8-char prefix is unambiguous whenever one is present. Every
+ * renderer that shortens an identity handle for prose goes through here — the guard used to live in `emitStrictDeny`
  * alone, and the two warn-mode renderers sliced the sentinel. Mirrors Python's
  * `hook_payloads.short_session_id`.
  */
-export function shortSessionId(sessionId: string): string {
-  return sessionId.startsWith("<") && sessionId.endsWith(">") ? sessionId : sessionId.slice(0, 8);
+export function shortSessionId(identityId: string): string {
+  return identityId.startsWith("<") && identityId.endsWith(">") ? identityId : identityId.slice(0, 8);
 }
 
 /**
@@ -194,6 +264,16 @@ export function shortSessionId(sessionId: string): string {
  * The `source` arg is kept for call-site telemetry parity with Python.
  */
 export function emitStrictDeny(args: { source: string; summary: StaleSummary }): HookSpecificOutput {
+  if (!summaryReportsAWrite(args.summary)) {
+    return {
+      hookEventName: "PreToolUse",
+      permissionDecision: "deny",
+      permissionDecisionReason: GRANT_CHANGE_DENY_REASON_TEMPLATE.replaceAll(
+        "{path}",
+        args.summary.path,
+      ).replace("{current_version}", String(args.summary.current_version)),
+    };
+  }
   const lastWriterFull = args.summary.last_writer_session_id || "<unknown>";
   const lastWriterShort = shortSessionId(lastWriterFull);
   const lastWriterTsIso = pythonIsoUtc(args.summary.last_writer_at_unix_ts);
@@ -240,6 +320,7 @@ export function nowUnix(): number {
  * strict-mode flip. Matches Python `stale_read_warning` prose pattern.
  */
 export function staleReadWarning(summary: StaleSummary): string {
+  if (!summaryReportsAWrite(summary)) return grantChangeWarning(summary);
   const lastWriterShort = shortSessionId(summary.last_writer_session_id);
   const lastWriterTs = pythonIsoUtc(summary.last_writer_at_unix_ts);
   const generatedTs = pythonIsoUtc(summary.warning_generated_at_unix_ts);
@@ -259,10 +340,34 @@ export function staleReadWarning(summary: StaleSummary): string {
 
   return (
     `⚠ Stale read [warning emitted ${generatedTs}]: ${summary.path} was ` +
-    `updated by session ${lastWriterShort} at ${lastWriterTs}. ` +
+    `updated by agent ${lastWriterShort} at ${lastWriterTs}. ` +
     `Current version is v${summary.current_version}; ${priorClause}. ` +
     `${divergence} ` +
     `Consider re-reading ${summary.path} before acting on stale assumptions.`
+  );
+}
+
+/**
+ * The warn-mode counterpart of `GRANT_CHANGE_DENY_REASON_TEMPLATE` —
+ * BYTE-IDENTICAL to Python `_grant_change_warning`.
+ *
+ * Reached only when `summaryReportsAWrite` refuses, which fixes both of the
+ * other two facts this prose states: `hash_differs` is false there (so the
+ * worktree really does still match) and `prior_version_seen_by_session`
+ * equals `current_version` (so "the version you last saw" is exact).
+ *
+ * The advice differs from the write arm on purpose. Nothing moved under the
+ * reader, so re-reading buys it nothing; what it lost is the grant, and the
+ * next thing that will fail is a write.
+ */
+function grantChangeWarning(summary: StaleSummary): string {
+  const generatedTs = pythonIsoUtc(summary.warning_generated_at_unix_ts);
+  const path = summary.path;
+  return (
+    `⚠ Stale read [warning emitted ${generatedTs}]: your grant on ${path} ` +
+    `was revoked and no new version was committed. ${path} is still at ` +
+    `v${summary.current_version}, the version you last saw. ` +
+    `Re-acquire before writing to ${path}.`
   );
 }
 
@@ -279,7 +384,7 @@ export function editCollisionWarning(
   const holderTs = pythonIsoUtc(holderAcquiredAtUnixTs);
   const detectedTs = pythonIsoUtc(nowUnix());
   return (
-    `⚠ Concurrent edit detected at ${detectedTs} (UTC): another session ` +
+    `⚠ Concurrent edit detected at ${detectedTs} (UTC): another agent ` +
     `(${holderShort}) has been editing ${path} since ${holderTs}. ` +
     `Your edit will land in your own worktree, but only one session's ` +
     `commit will be accepted by the coordinator. Consider waiting for the ` +
@@ -340,7 +445,7 @@ export function editCollisionWarning(
 export function preemptionNoticeText(
   notices: ReadonlyArray<{
     artifactPath: string;
-    preempterSessionShort: string;
+    preempterAgentShort: string;
     preemptedAtUnixTs: number;
   }>,
   /**
@@ -359,7 +464,7 @@ export function preemptionNoticeText(
   if (notices.length === 0) return "";
   const lines = notices.map(
     (n) =>
-      `  • ${n.artifactPath} preempted by session ${n.preempterSessionShort} at ${pythonIsoUtc(n.preemptedAtUnixTs)}`,
+      `  • ${n.artifactPath} preempted by agent ${n.preempterAgentShort} at ${pythonIsoUtc(n.preemptedAtUnixTs)}`,
   );
   const intro =
     totalCount === 1
