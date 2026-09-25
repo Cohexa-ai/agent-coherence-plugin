@@ -1,8 +1,17 @@
 /**
  * Caller principal through the REAL hook client binary (library
- * caller-principal plan, U5). The Python coordinator mints a principal per session and
- * requires it on its require-class routes; this Node coordinator issues none
- * (404 on the claim) and ignores the header (plan KTD12).
+ * caller-principal plan, U5). The Python coordinator mints a principal per
+ * session; once a session is bound, a request naming it without that
+ * principal is refused on the require-class routes, while a session nobody
+ * has claimed is admitted and counted (KTD15), and a presented principal that
+ * is not the bound one is refused on every route. This Node coordinator
+ * issues none (404 on the claim) and ignores the header (plan KTD12).
+ *
+ * A principal refusal is HTTP 400 carrying a typed `reason`
+ * (`caller_principal_absent` / `caller_principal_foreign`). The client
+ * classifies it by that key alone and recovers by re-claiming with the SAME
+ * stored mint nonce — never a new one — then retrying the refused request
+ * once.
  *
  * What the principal buys on the hook surface is convention-enforcement and a
  * detectable unbound caller: the client stores it under `.coherence/`, so any
@@ -15,9 +24,11 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   rmSync,
   statSync,
+  utimesSync,
   writeFileSync,
 } from 'node:fs';
 import { spawn } from 'node:child_process';
@@ -68,21 +79,25 @@ async function readBody(req: IncomingMessage): Promise<Record<string, unknown>> 
   return text === '' ? {} : (JSON.parse(text) as Record<string, unknown>);
 }
 
+type Answer = { status: number; body: unknown };
+type Answerer = (
+  url: string,
+  body: Record<string, unknown>,
+  principal: string | undefined
+) => Answer;
+
 /** A stand-in for a principal-issuing (Python) coordinator: scripted claim and hook answers, every request recorded. */
 async function fakeCoordinator(
   root: string,
-  answer: (url: string, body: Record<string, unknown>) => { status: number; body: unknown }
+  answer: Answerer
 ): Promise<{ server: Server; seen: Recorded[] }> {
   const seen: Recorded[] = [];
   const server = createHttpServer((req, res) => {
     void readBody(req).then((body) => {
-      const principal = req.headers[HEADER];
-      seen.push({
-        url: req.url ?? '',
-        principal: typeof principal === 'string' ? principal : undefined,
-        body,
-      });
-      const out = answer(req.url ?? '', body);
+      const header = req.headers[HEADER];
+      const principal = typeof header === 'string' ? header : undefined;
+      seen.push({ url: req.url ?? '', principal, body });
+      const out = answer(req.url ?? '', body, principal);
       const payload = JSON.stringify(out.body);
       res.writeHead(out.status, {
         'Content-Type': 'application/json',
@@ -197,38 +212,462 @@ test('a refused claim is reported and NOT re-minted: nothing stored, the nonce l
   }
 });
 
-test('a foreign-principal refusal is reported; the stored principal stays and nothing is re-claimed; stdout is {}', async () => {
+// ------------------------------- a principal refusal, and recovering from one
+
+/** FROZEN duplicates of the typed refusal reasons — never imported from the code under test. */
+const FOREIGN = 'caller_principal_foreign';
+const ABSENT = 'caller_principal_absent';
+const CLAIMED = 'caller_principal_claimed';
+/** The refusal prose deliberately never names the header: the client must classify by `reason`. */
+const REFUSED_TEXT = 'principal refused';
+/** FROZEN duplicate of the Python posture table's require class for the hook routes (KTD15). */
+const REQUIRE_CLASS = new Set(['/hooks/pre-edit', '/hooks/post-edit', '/hooks/session-stop']);
+const NONCE = 'N'.repeat(43);
+const STALE = 'S'.repeat(43);
+const FRESH = 'F'.repeat(43);
+
+const refusal = (reason: string): Answer => ({
+  status: 400,
+  body: { error: REFUSED_TEXT, reason },
+});
+const hookOk = (url: string): Answer => ({
+  status: 200,
+  body: url === '/hooks/pre-read' ? { status: 'fresh', version: 1 } : { ok: true },
+});
+
+interface Binding {
+  nonce: string;
+  principal: string;
+}
+
+/**
+ * A stand-in for the Python coordinator's binding store and route posture: a
+ * first claim binds, a claim presenting the binding's own nonce gets the same
+ * principal back (R20), any other nonce is refused; a presented principal must
+ * be the bound one on every route, and an absent one is refused only on a
+ * require-class route of a bound session. Clearing `bindings` is what removing
+ * state.db does: every binding gone, the client's files left in place.
+ */
+function pythonLikeCoordinator(): { answer: Answerer; bindings: Map<string, Binding> } {
+  const bindings = new Map<string, Binding>();
+  let minted = 0;
+  const answer: Answerer = (url, body, principal) => {
+    const sessionId = String(body.session_id);
+    const bound = bindings.get(sessionId);
+    if (url === '/principal/claim') {
+      const nonce = String(body.mint_nonce);
+      if (bound === undefined) {
+        minted += 1;
+        const fresh = `M${String(minted).padStart(42, '0')}`;
+        bindings.set(sessionId, { nonce, principal: fresh });
+        return { status: 200, body: { ok: true, principal: fresh } };
+      }
+      return bound.nonce === nonce
+        ? { status: 200, body: { ok: true, principal: bound.principal } }
+        : { status: 200, body: { ok: false, reason: CLAIMED, detail: 'bound' } };
+    }
+    if (principal !== undefined) {
+      return bound?.principal === principal ? hookOk(url) : refusal(FOREIGN);
+    }
+    return bound !== undefined && REQUIRE_CLASS.has(url) ? refusal(ABSENT) : hookOk(url);
+  };
+  return { answer, bindings };
+}
+
+function hookPayload(root: string, hook: string, sessionId: string = SID): string {
+  return hook === 'session-stop'
+    ? JSON.stringify({ session_id: sessionId })
+    : postEditPayload(root, sessionId);
+}
+
+function writeStored(root: string, values: { nonce?: string; principal?: string }): void {
+  const files = filesFor(root, SID);
+  if (values.nonce !== undefined) writeFileSync(files.nonce, `${values.nonce}\n`, { mode: 0o600 });
+  if (values.principal !== undefined)
+    writeFileSync(files.principal, `${values.principal}\n`, { mode: 0o600 });
+}
+
+/** What `.coherence/` holds: a replacement leaves no temporary file behind. */
+function coherenceEntries(root: string): string[] {
+  return readdirSync(join(root, '.coherence')).sort();
+}
+
+function expectedEntries(): string[] {
+  const key = sessionToAgentId(SID);
+  return [
+    `caller-principal-${key}.nonce`,
+    `caller-principal-${key}.principal`,
+    'hook.secret',
+    'server.pid',
+  ].sort();
+}
+
+const trail = (seen: Recorded[]): Array<[string, string | undefined]> =>
+  seen.map((r) => [r.url, r.principal]);
+
+async function withCoordinator(
+  answer: Answerer,
+  body: (root: string, seen: Recorded[]) => Promise<void>
+): Promise<void> {
   const root = makeWorkspace();
-  const refusal =
-    'the Coherence-Caller-Principal header is not the caller principal bound to the session_id this request names (caller_principal_foreign)';
-  const { server, seen } = await fakeCoordinator(root, (url) =>
-    url === '/hooks/post-edit'
-      ? { status: 400, body: { error: refusal } }
-      : { status: 200, body: { ok: true } }
-  );
+  const { server, seen } = await fakeCoordinator(root, answer);
   try {
-    const { principal } = filesFor(root, SID);
-    const stale = 'Q'.repeat(43);
-    writeFileSync(principal, `${stale}\n`, { mode: 0o600 });
-    const run = await runClient(['post-edit', '--root', root], postEditPayload(root), root);
-    assert.equal(run.status, 0);
-    assert.equal(run.stdout.trim(), '{}');
-    assert.ok(run.stderr.includes(refusal), run.stderr);
-    assert.equal(
-      readFileSync(principal, 'utf8').trim(),
-      stale,
-      'the stored principal is left in place'
-    );
-    assert.deepEqual(
-      seen.map((r) => [r.url, r.principal]),
-      [['/hooks/post-edit', stale]],
-      'no claim, no retry'
-    );
+    await body(root, seen);
   } finally {
     await close(server);
     rmSync(root, { recursive: true, force: true });
   }
+}
+
+for (const hook of ['pre-read', 'post-edit'] as const) {
+  test(`${hook}: a stored principal that outlived its binding (state.db removed) is re-claimed with the SAME nonce, replaced, and the hook retried once`, async () => {
+    const coordinator = pythonLikeCoordinator();
+    await withCoordinator(coordinator.answer, async (root, seen) => {
+      await runClient(['post-edit', '--root', root], postEditPayload(root), root);
+      const { nonce, principal } = filesFor(root, SID);
+      const nonceBytes = readFileSync(nonce, 'utf8');
+      const stale = readFileSync(principal, 'utf8').trim();
+      coordinator.bindings.clear();
+      seen.length = 0;
+
+      const run = await runClient([hook, '--root', root], hookPayload(root, hook), root);
+
+      const fresh = coordinator.bindings.get(SID)?.principal;
+      assert.ok(fresh !== undefined && fresh !== stale, 'the re-claim bound a new principal');
+      assert.equal(run.status, 0);
+      assert.deepEqual(JSON.parse(run.stdout), hookOk(`/hooks/${hook}`).body);
+      assert.deepEqual(trail(seen), [
+        [`/hooks/${hook}`, stale],
+        ['/principal/claim', undefined],
+        [`/hooks/${hook}`, fresh],
+      ]);
+      assert.equal(seen[1]!.body.mint_nonce, nonceBytes.trim(), 'the SAME stored nonce');
+      assert.equal(readFileSync(nonce, 'utf8'), nonceBytes, 'the nonce file is never rewritten');
+      assert.equal(readFileSync(principal, 'utf8').trim(), fresh, 'the stored principal replaced');
+      assert.equal(statSync(principal).mode & 0o777, 0o600);
+      assert.deepEqual(coherenceEntries(root), expectedEntries());
+      assert.equal(run.stderr, '', 'a recovered refusal is not an error');
+
+      seen.length = 0;
+      await runClient(['session-stop', '--root', root], hookPayload(root, 'session-stop'), root);
+      assert.deepEqual(trail(seen), [['/hooks/session-stop', fresh]], 'later hooks present it');
+    });
+  });
+}
+
+test('a lost claim response (R20): the absent refusal is recovered by re-claiming with the stored nonce, then the hook is retried once', async () => {
+  const coordinator = pythonLikeCoordinator();
+  let claims = 0;
+  const loseFirst: Answerer = (url, body, principal) => {
+    const out = coordinator.answer(url, body, principal);
+    if (url === '/principal/claim' && ++claims === 1) {
+      // The bind committed; the answer is the Python claim route's degrade envelope.
+      return { status: 200, body: { ok: false, degraded: true, reason: 'claim_unconfirmed' } };
+    }
+    return out;
+  };
+  await withCoordinator(loseFirst, async (root, seen) => {
+    const run = await runClient(['post-edit', '--root', root], postEditPayload(root), root);
+    const bound = coordinator.bindings.get(SID)!;
+    assert.deepEqual(JSON.parse(run.stdout), { ok: true });
+    assert.deepEqual(trail(seen), [
+      ['/principal/claim', undefined],
+      ['/hooks/post-edit', undefined],
+      ['/principal/claim', undefined],
+      ['/hooks/post-edit', bound.principal],
+    ]);
+    assert.equal(seen[0]!.body.mint_nonce, seen[2]!.body.mint_nonce, 'one nonce, never re-minted');
+    assert.equal(readFileSync(filesFor(root, SID).principal, 'utf8').trim(), bound.principal);
+  });
 });
+
+test('a re-claim that hands back the principal already presented is reported and NOT retried', async () => {
+  const sameAgain: Answerer = (url) =>
+    url === '/principal/claim'
+      ? { status: 200, body: { ok: true, principal: STALE } }
+      : refusal(FOREIGN);
+  await withCoordinator(sameAgain, async (root, seen) => {
+    writeStored(root, { nonce: NONCE, principal: STALE });
+    const run = await runClient(['post-edit', '--root', root], postEditPayload(root), root);
+    assert.equal(run.stdout.trim(), '{}');
+    assert.deepEqual(trail(seen), [
+      ['/hooks/post-edit', STALE],
+      ['/principal/claim', undefined],
+    ]);
+    assert.match(run.stderr, new RegExp(`\\(${FOREIGN}\\).*principal already presented`));
+    assert.equal(readFileSync(filesFor(root, SID).principal, 'utf8').trim(), STALE);
+  });
+});
+
+test('a session bound under ANOTHER nonce: the re-claim is refused, reported, and nothing is re-minted or rewritten', async () => {
+  const coordinator = pythonLikeCoordinator();
+  coordinator.bindings.set(SID, { nonce: 'O'.repeat(43), principal: 'Q'.repeat(43) });
+  await withCoordinator(coordinator.answer, async (root, seen) => {
+    writeStored(root, { nonce: NONCE, principal: STALE });
+    const { nonce, principal } = filesFor(root, SID);
+    const before = [readFileSync(nonce, 'utf8'), readFileSync(principal, 'utf8')];
+    const run = await runClient(['post-edit', '--root', root], postEditPayload(root), root);
+    assert.equal(run.stdout.trim(), '{}');
+    assert.deepEqual(trail(seen), [
+      ['/hooks/post-edit', STALE],
+      ['/principal/claim', undefined],
+    ]);
+    assert.equal(seen[1]!.body.mint_nonce, NONCE, 'the stored nonce, never a new one');
+    assert.match(run.stderr, /bound under a different mint nonce/);
+    assert.deepEqual([readFileSync(nonce, 'utf8'), readFileSync(principal, 'utf8')], before);
+    assert.deepEqual(coordinator.bindings.get(SID)?.nonce, 'O'.repeat(43));
+  });
+});
+
+test('a coordinator that issues no principals now (404 on the re-claim): the hook is retried once WITHOUT the header', async () => {
+  const noPrincipals: Answerer = (url, _body, principal) =>
+    url === '/principal/claim'
+      ? { status: 404, body: { error: 'not found' } }
+      : principal !== undefined
+        ? refusal(FOREIGN)
+        : hookOk(url);
+  await withCoordinator(noPrincipals, async (root, seen) => {
+    writeStored(root, { nonce: NONCE, principal: STALE });
+    const run = await runClient(['post-edit', '--root', root], postEditPayload(root), root);
+    assert.deepEqual(JSON.parse(run.stdout), { ok: true });
+    assert.deepEqual(trail(seen), [
+      ['/hooks/post-edit', STALE],
+      ['/principal/claim', undefined],
+      ['/hooks/post-edit', undefined],
+    ]);
+    assert.equal(
+      readFileSync(filesFor(root, SID).principal, 'utf8').trim(),
+      STALE,
+      'never deleted'
+    );
+    assert.equal(readFileSync(filesFor(root, SID).nonce, 'utf8').trim(), NONCE, 'never deleted');
+  });
+});
+
+test('no stored mint nonce: the refusal is reported by its typed reason, nothing is claimed or created, the stored principal stays', async () => {
+  await withCoordinator(
+    () => refusal(FOREIGN),
+    async (root, seen) => {
+      writeStored(root, { principal: STALE });
+      const run = await runClient(['post-edit', '--root', root], postEditPayload(root), root);
+      assert.equal(run.status, 0);
+      assert.equal(run.stdout.trim(), '{}');
+      assert.match(run.stderr, new RegExp(`\\(${FOREIGN}\\).*no stored mint nonce`));
+      assert.deepEqual(trail(seen), [['/hooks/post-edit', STALE]], 'no claim, no retry');
+      assert.equal(readFileSync(filesFor(root, SID).principal, 'utf8').trim(), STALE);
+      assert.ok(!existsSync(filesFor(root, SID).nonce), 'recovery never creates a nonce');
+    }
+  );
+});
+
+test('the retry happens at most ONCE: a retried hook refused again is reported, not re-claimed', async () => {
+  const alwaysForeign: Answerer = (url) =>
+    url === '/principal/claim'
+      ? { status: 200, body: { ok: true, principal: FRESH } }
+      : refusal(FOREIGN);
+  await withCoordinator(alwaysForeign, async (root, seen) => {
+    writeStored(root, { nonce: NONCE, principal: STALE });
+    const run = await runClient(['post-edit', '--root', root], postEditPayload(root), root);
+    assert.equal(run.stdout.trim(), '{}');
+    assert.deepEqual(trail(seen), [
+      ['/hooks/post-edit', STALE],
+      ['/principal/claim', undefined],
+      ['/hooks/post-edit', FRESH],
+    ]);
+    assert.match(run.stderr, /refused this hook's caller principal again/);
+  });
+});
+
+test('a refusal is classified by its typed reason alone: a 400 whose PROSE names the header and reason, but carries no reason key, is not one', async () => {
+  const proseOnly: Answerer = () => ({
+    status: 400,
+    body: {
+      error:
+        'the Coherence-Caller-Principal header is not the caller principal bound to the session_id this request names (caller_principal_foreign)',
+    },
+  });
+  await withCoordinator(proseOnly, async (root, seen) => {
+    writeStored(root, { nonce: NONCE, principal: STALE });
+    const run = await runClient(['post-edit', '--root', root], postEditPayload(root), root);
+    assert.equal(run.stdout.trim(), '{}');
+    assert.deepEqual(trail(seen), [['/hooks/post-edit', STALE]], 'no claim, no retry');
+    assert.equal(run.stderr, '', 'an untyped 400 degrades like any other');
+  });
+});
+
+test('only the two principal refusal reasons are recovered: another caller_principal_* token is not one', async () => {
+  await withCoordinator(
+    () => ({ status: 400, body: { error: REFUSED_TEXT, reason: CLAIMED } }),
+    async (root, seen) => {
+      writeStored(root, { nonce: NONCE, principal: STALE });
+      const run = await runClient(['post-edit', '--root', root], postEditPayload(root), root);
+      assert.equal(run.stdout.trim(), '{}');
+      assert.deepEqual(trail(seen), [['/hooks/post-edit', STALE]], 'no claim, no retry');
+      assert.equal(run.stderr, '');
+    }
+  );
+});
+
+test('a typed principal reason on an answer that is not HTTP 400 is not a refusal: nothing is claimed or retried', async () => {
+  await withCoordinator(
+    () => ({ status: 409, body: { error: REFUSED_TEXT, reason: FOREIGN } }),
+    async (root, seen) => {
+      writeStored(root, { nonce: NONCE, principal: STALE });
+      const run = await runClient(['post-edit', '--root', root], postEditPayload(root), root);
+      assert.equal(run.stdout.trim(), '{}');
+      assert.deepEqual(trail(seen), [['/hooks/post-edit', STALE]], 'no claim, no retry');
+      assert.equal(run.stderr, '');
+    }
+  );
+});
+
+test('a session id with a trailing newline is never claimed for, and a refusal naming it is not recovered (the Python client applies the same rule)', async () => {
+  const sid = `${SID}\n`;
+  const alwaysAbsent: Answerer = (url) =>
+    url === '/principal/claim'
+      ? { status: 200, body: { ok: true, principal: FRESH } }
+      : refusal(ABSENT);
+  await withCoordinator(alwaysAbsent, async (root, seen) => {
+    // A nonce a client that claimed for this id would have stored.
+    const { nonce } = filesFor(root, sid);
+    writeFileSync(nonce, `${NONCE}\n`, { mode: 0o600 });
+    const run = await runClient(['post-edit', '--root', root], postEditPayload(root, sid), root);
+    assert.equal(run.stdout.trim(), '{}');
+    assert.deepEqual(trail(seen), [['/hooks/post-edit', undefined]], 'no claim, no retry');
+    assert.match(run.stderr, /\(caller_principal_absent\); the session id is malformed/);
+    assert.equal(readFileSync(nonce, 'utf8'), `${NONCE}\n`);
+  });
+});
+
+for (const [label, torn] of [
+  ['empty', ''],
+  ['malformed', 'not-a-principal\n'],
+] as const) {
+  test(`a torn (${label}) stored principal is re-obtained with the stored nonce and REPAIRED, so later hooks claim nothing`, async () => {
+    const coordinator = pythonLikeCoordinator();
+    coordinator.bindings.set(SID, { nonce: NONCE, principal: FRESH });
+    await withCoordinator(coordinator.answer, async (root, seen) => {
+      writeStored(root, { nonce: NONCE });
+      writeFileSync(filesFor(root, SID).principal, torn, { mode: 0o600 });
+      await runClient(['post-edit', '--root', root], postEditPayload(root), root);
+      await runClient(['session-stop', '--root', root], hookPayload(root, 'session-stop'), root);
+      assert.deepEqual(trail(seen), [
+        ['/principal/claim', undefined],
+        ['/hooks/post-edit', FRESH],
+        ['/hooks/session-stop', FRESH],
+      ]);
+      assert.equal(seen[0]!.body.mint_nonce, NONCE);
+      const { principal } = filesFor(root, SID);
+      assert.equal(readFileSync(principal, 'utf8').trim(), FRESH);
+      assert.equal(statSync(principal).mode & 0o777, 0o600);
+      assert.deepEqual(coherenceEntries(root), expectedEntries());
+    });
+  });
+}
+
+test('an EMPTY mint-nonce file a crashed writer left behind is never overwritten: the hook claims nothing, proceeds without a principal, and names the file to remove', async () => {
+  const coordinator = pythonLikeCoordinator();
+  await withCoordinator(coordinator.answer, async (root, seen) => {
+    const { nonce, principal } = filesFor(root, SID);
+    writeFileSync(nonce, '', { mode: 0o600 });
+    const longAgo = Date.now() / 1000 - 60;
+    utimesSync(nonce, longAgo, longAgo);
+    const first = await runClient(['post-edit', '--root', root], postEditPayload(root), root);
+    const second = await runClient(
+      ['session-stop', '--root', root],
+      hookPayload(root, 'session-stop'),
+      root
+    );
+    // Unbound, so the Python coordinator admits the absent principal (KTD15).
+    assert.deepEqual(JSON.parse(first.stdout), hookOk('/hooks/post-edit').body);
+    assert.deepEqual(JSON.parse(second.stdout), hookOk('/hooks/session-stop').body);
+    assert.deepEqual(trail(seen), [
+      ['/hooks/post-edit', undefined],
+      ['/hooks/session-stop', undefined],
+    ]);
+    assert.equal(coordinator.bindings.size, 0, 'nothing was claimed');
+    assert.equal(statSync(nonce).size, 0, 'the nonce file is never overwritten');
+    assert.ok(!existsSync(principal));
+    for (const run of [first, second]) {
+      assert.ok(run.stderr.includes(nonce), 'the report names the file in full');
+      assert.match(run.stderr, /remove .* by hand/);
+    }
+  });
+});
+
+// R5: nothing prints a principal or a nonce — not on a refusal, not on a
+// recovery, not in a thrown message. Each coordinator below ECHOES every value
+// it was sent into its error prose and reason fields, so a client that relays
+// coordinator text, or builds a message from a value, is caught.
+const echo = (body: Record<string, unknown>, principal: string | undefined): string =>
+  `saw principal=${principal ?? '-'} nonce=${String(body.mint_nonce ?? '-')}`;
+
+const R5_SCENARIOS: Array<[string, Answerer, boolean]> = [
+  [
+    're-claim unconfirmed (reason echoes the nonce)',
+    (url, body, principal) =>
+      url === '/principal/claim'
+        ? {
+            status: 200,
+            body: { ok: false, reason: String(body.mint_nonce), detail: echo(body, principal) },
+          }
+        : { status: 400, body: { error: echo(body, principal), reason: FOREIGN } },
+    true,
+  ],
+  [
+    're-claim answered 503 with echoed prose',
+    (url, body, principal) =>
+      url === '/principal/claim'
+        ? { status: 503, body: { error: echo(body, principal), reason: String(body.mint_nonce) } }
+        : { status: 400, body: { error: echo(body, principal), reason: FOREIGN } },
+    true,
+  ],
+  [
+    're-claim refused (detail echoes the nonce)',
+    (url, body, principal) =>
+      url === '/principal/claim'
+        ? { status: 200, body: { ok: false, reason: CLAIMED, detail: echo(body, principal) } }
+        : { status: 400, body: { error: echo(body, principal), reason: FOREIGN } },
+    true,
+  ],
+  [
+    'recovered, then the retry refused again (prose echoes the new principal)',
+    (url, body, principal) =>
+      url === '/principal/claim'
+        ? { status: 200, body: { ok: true, principal: FRESH } }
+        : { status: 400, body: { error: echo(body, principal), reason: FOREIGN } },
+    true,
+  ],
+  [
+    'recovered, and the retry admitted',
+    (url, body, principal) =>
+      url === '/principal/claim'
+        ? { status: 200, body: { ok: true, principal: FRESH } }
+        : principal === FRESH
+          ? hookOk(url)
+          : { status: 400, body: { error: echo(body, principal), reason: FOREIGN } },
+    false,
+  ],
+];
+
+for (const [label, answer, reportsFailure] of R5_SCENARIOS) {
+  test(`R5: no principal or nonce reaches stderr or stdout — ${label}`, async () => {
+    await withCoordinator(answer, async (root, seen) => {
+      writeStored(root, { nonce: NONCE, principal: STALE });
+      const run = await runClient(['post-edit', '--root', root], postEditPayload(root), root);
+      assert.ok(
+        seen.some((r) => r.url === '/principal/claim'),
+        'the recovery path ran (a re-claim was sent)'
+      );
+      if (reportsFailure) assert.notEqual(run.stderr, '', 'the refusal was reported');
+      else assert.deepEqual(JSON.parse(run.stdout), { ok: true });
+      for (const value of [NONCE, STALE, FRESH]) {
+        assert.ok(!run.stderr.includes(value), `stderr carries a value: ${label}`);
+        assert.ok(!run.stdout.includes(value), `stdout carries a value: ${label}`);
+      }
+    });
+  });
+}
 
 // ------------------------------------------------ against THIS (Node) coordinator
 
