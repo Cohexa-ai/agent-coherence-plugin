@@ -83,6 +83,26 @@ export function readPortFromPidFile(pidFilePath: string): number | null {
   return port;
 }
 
+/**
+ * The `backend=<name>` a coordinator recorded on line index 2 of server.pid,
+ * or null when there is none. The Node coordinator writes
+ * `<pid>\n<port>\nbackend=node\n`; the Python coordinator writes no backend
+ * line. Never needed to REACH a coordinator (the port is line 1 only) — read
+ * solely to skip work a Node coordinator could never answer.
+ */
+export function readBackendFromPidFile(pidFilePath: string): string | null {
+  let text: string;
+  try {
+    text = readFileSync(pidFilePath, 'utf8');
+  } catch {
+    return null;
+  }
+  const line = text.split(/\r?\n/)[2];
+  if (line === undefined || !line.startsWith('backend=')) return null;
+  const backend = line.slice('backend='.length).trim();
+  return backend === '' ? null : backend;
+}
+
 /** Read port + bearer from `<root>/.coherence/` or throw CoordinatorUnavailable. */
 export function resolveEndpoint(coordinatorRoot: string): CoordinatorEndpoint {
   const coherenceDir = join(coordinatorRoot, ".coherence");
@@ -110,13 +130,30 @@ export function resolveEndpoint(coordinatorRoot: string): CoordinatorEndpoint {
  * non-2xx response (the Python HTTPError→None degrade), and rejects on a
  * network error (caller maps to CoordinatorUnavailable semantics).
  */
-export function requestJson(
+export async function requestJson(
   endpoint: CoordinatorEndpoint,
   method: "GET" | "POST",
   path: string,
   body?: unknown,
   extraHeaders?: Record<string, string>,
 ): Promise<Record<string, unknown> | null> {
+  const answer = await requestJsonStatus(endpoint, method, path, body, extraHeaders);
+  return answer.status >= 200 && answer.status < 300 ? answer.body : null;
+}
+
+/**
+ * The same request, resolving to the HTTP status beside the parsed body (null
+ * when the body is not JSON). For callers that must tell a 404 (a route the
+ * coordinator does not implement) from other refusals, or read a 400's
+ * `{error}` — the caller-principal claim and its refusal report.
+ */
+export function requestJsonStatus(
+  endpoint: CoordinatorEndpoint,
+  method: "GET" | "POST",
+  path: string,
+  body?: unknown,
+  extraHeaders?: Record<string, string>,
+): Promise<{ status: number; body: Record<string, unknown> | null }> {
   return new Promise((resolvePromise, rejectPromise) => {
     const payload = body === undefined ? null : Buffer.from(JSON.stringify(body), "utf8");
     const headers: Record<string, string> = {
@@ -134,15 +171,17 @@ export function requestJson(
         res.on("data", (c: Buffer) => chunks.push(c));
         res.on("end", () => {
           const status = res.statusCode ?? 0;
-          if (status < 200 || status >= 300) {
-            resolvePromise(null);
-            return;
-          }
+          let parsed: Record<string, unknown> | null = null;
           try {
-            resolvePromise(JSON.parse(Buffer.concat(chunks).toString("utf8")));
+            const value: unknown = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+            parsed =
+              value !== null && typeof value === "object" && !Array.isArray(value)
+                ? (value as Record<string, unknown>)
+                : null;
           } catch {
-            resolvePromise(null);
+            parsed = null;
           }
+          resolvePromise({ status, body: parsed });
         });
       },
     );

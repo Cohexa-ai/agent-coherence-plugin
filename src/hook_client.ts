@@ -33,15 +33,24 @@
  * composite `(session_id, agent_id)` identity from it so subagents are
  * first-class coherence peers; an absent/malformed `agent_id` resolves to the
  * parent identity (except on subagent-stop, which requires a valid one).
+ *
+ * Caller principal (library caller-principal plan, U5): every request presents
+ * the session's principal in the `Coherence-Caller-Principal` header, obtained
+ * once per session and stored under `.coherence/` (see caller_principal.ts).
+ * The Python coordinator requires it on its require-class routes for a
+ * session a client has claimed. This Node coordinator issues none; its pid
+ * file says `backend=node`, so the client does not claim and the request is
+ * exactly what it was before.
  */
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 import { isValidSubagentId } from "./agent_id.js";
+import { CALLER_PRINCIPAL_HEADER, obtainStoredPrincipal, principalHeaders } from "./caller_principal.js";
 import {
   CoordinatorUnavailable,
   findCoordinatorRoot,
   hashFile,
-  requestJson,
+  requestJsonStatus,
   resolveEndpoint,
 } from "./hook_client_transport.js";
 
@@ -248,6 +257,11 @@ function emitEmpty(): void {
   process.stdout.write("{}\n");
 }
 
+/** One diagnostic line on stderr; stdout and the exit code are unaffected. */
+function report(message: string): void {
+  process.stderr.write(`agent-coherence-hook-client: ${message}\n`);
+}
+
 async function readStdin(): Promise<string> {
   const chunks: Buffer[] = [];
   for await (const chunk of process.stdin) chunks.push(chunk as Buffer);
@@ -314,7 +328,22 @@ export async function runMain(argv: string[]): Promise<number> {
     let response: Record<string, unknown> | null;
     try {
       const payload = buildPayload(sub, cc, rootResolved);
-      response = await requestJson(endpoint, "POST", ENDPOINT_BY_SUBCOMMAND[sub], payload);
+      const principal = await obtainStoredPrincipal(endpoint, rootResolved, String(payload.session_id), report);
+      const answer = await requestJsonStatus(
+        endpoint,
+        "POST",
+        ENDPOINT_BY_SUBCOMMAND[sub],
+        payload,
+        principalHeaders(principal),
+      );
+      // Any non-2xx degrades to `{}` exactly as before. A principal refusal is
+      // the one worth a stderr line: coherence is off for this session on the
+      // routes that require a principal, and the stored value is left in place.
+      response = answer.status >= 200 && answer.status < 300 ? answer.body : null;
+      const error = answer.body?.error;
+      if (response === null && typeof error === "string" && error.includes(CALLER_PRINCIPAL_HEADER)) {
+        report(`coordinator refused this hook's caller principal: ${error}`);
+      }
     } catch {
       // SkipHook, network error, builder bug — degrade silently.
       emitEmpty();
