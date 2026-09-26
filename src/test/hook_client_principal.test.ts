@@ -528,6 +528,70 @@ test('the retry happens at most ONCE: a retried hook refused again is reported, 
   });
 });
 
+/**
+ * Refused, recovered, refused again — the two refusals carrying DIFFERENT
+ * reasons, so the report can name only the one it must: the retry's. The
+ * coordinator refuses an absent header as `absent` and any presented principal
+ * as `foreign`; each case differs only in its claim answers and what is stored.
+ */
+const REFUSED_TWICE: Array<{
+  label: string;
+  stored: { nonce?: string; principal?: string };
+  claim: (n: number) => Answer;
+  trail: Array<[string, string | undefined]>;
+  second: string;
+}> = [
+  {
+    label: 'absent, then foreign after a re-claim that bound a new principal',
+    stored: {},
+    // The first claim's answer is lost (the degrade envelope); the re-claim binds.
+    claim: (n) =>
+      n === 1
+        ? { status: 200, body: { ok: false, degraded: true, reason: 'claim_unconfirmed' } }
+        : { status: 200, body: { ok: true, principal: FRESH } },
+    trail: [
+      ['/principal/claim', undefined],
+      ['/hooks/post-edit', undefined],
+      ['/principal/claim', undefined],
+      ['/hooks/post-edit', FRESH],
+    ],
+    second: FOREIGN,
+  },
+  {
+    label: 'foreign, then absent after a re-claim answered 404',
+    stored: { nonce: NONCE, principal: STALE },
+    claim: () => ({ status: 404, body: { error: 'not found' } }),
+    trail: [
+      ['/hooks/post-edit', STALE],
+      ['/principal/claim', undefined],
+      ['/hooks/post-edit', undefined],
+    ],
+    second: ABSENT,
+  },
+];
+
+for (const { label, stored, claim, trail: expected, second } of REFUSED_TWICE) {
+  test(`refused again after the re-claim: the report names the RETRY's reason, not the first refusal's (${label})`, async () => {
+    let claims = 0;
+    const answer: Answerer = (url, _body, principal) =>
+      url === '/principal/claim'
+        ? claim(++claims)
+        : refusal(principal === undefined ? ABSENT : FOREIGN);
+    await withCoordinator(answer, async (root, seen) => {
+      writeStored(root, stored);
+      const run = await runClient(['post-edit', '--root', root], postEditPayload(root), root);
+      assert.equal(run.status, 0);
+      assert.equal(run.stdout.trim(), '{}');
+      // Both refusals happened: the first presented one way, the retry the other.
+      assert.deepEqual(trail(seen), expected);
+      const named = [...run.stderr.matchAll(/again after the re-claim \(([^)]*)\)/g)].map(
+        (m) => m[1]
+      );
+      assert.deepEqual(named, [second], `one report, naming ${second}: ${run.stderr}`);
+    });
+  });
+}
+
 test('a refusal is classified by its typed reason alone: a 400 whose PROSE names the header and reason, but carries no reason key, is not one', async () => {
   const proseOnly: Answerer = () => ({
     status: 400,
