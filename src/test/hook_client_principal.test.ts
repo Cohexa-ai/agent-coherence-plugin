@@ -42,6 +42,7 @@ import { PolicyRef } from '../policy.js';
 import { SessionRegistry } from '../sessions.js';
 import { createServer } from '../server.js';
 import { sessionToAgentId } from '../agent_id.js';
+import { principalRefusalReason, recoverFromPrincipalRefusal } from '../caller_principal.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const HOOK_CLIENT_JS = join(HERE, '..', 'hook_client.js');
@@ -79,7 +80,18 @@ async function readBody(req: IncomingMessage): Promise<Record<string, unknown>> 
   return text === '' ? {} : (JSON.parse(text) as Record<string, unknown>);
 }
 
-type Answer = { status: number; body: unknown };
+/**
+ * A scripted answer. `phrase` (the HTTP reason phrase), `headers` and `raw` (a
+ * body sent verbatim instead of JSON) let a fake put coordinator text in every
+ * free-text field an answer has.
+ */
+type Answer = {
+  status: number;
+  body: unknown;
+  phrase?: string;
+  headers?: Record<string, string>;
+  raw?: string;
+};
 type Answerer = (
   url: string,
   body: Record<string, unknown>,
@@ -98,11 +110,14 @@ async function fakeCoordinator(
       const principal = typeof header === 'string' ? header : undefined;
       seen.push({ url: req.url ?? '', principal, body });
       const out = answer(req.url ?? '', body, principal);
-      const payload = JSON.stringify(out.body);
-      res.writeHead(out.status, {
+      const payload = out.raw ?? JSON.stringify(out.body);
+      const headers = {
         'Content-Type': 'application/json',
         'Content-Length': Buffer.byteLength(payload),
-      });
+        ...(out.headers ?? {}),
+      };
+      if (out.phrase === undefined) res.writeHead(out.status, headers);
+      else res.writeHead(out.status, out.phrase, headers);
       res.end(payload);
     });
   });
@@ -209,6 +224,41 @@ test('a refused claim is reported and NOT re-minted: nothing stored, the nonce l
   } finally {
     await close(server);
     rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('any 2xx claim answer is the claim contract, as for the Python client: a 201 bound principal is stored and presented, a 201 caller_principal_claimed is a refusal', async () => {
+  const cases: Array<[string, Answer, boolean]> = [
+    ['bound', { status: 201, body: { ok: true, principal: MINTED } }, true],
+    [
+      'claimed',
+      { status: 201, body: { ok: false, reason: 'caller_principal_claimed', detail: 'bound' } },
+      false,
+    ],
+  ];
+  for (const [label, claimAnswer, bound] of cases) {
+    const root = makeWorkspace();
+    const { server, seen } = await fakeCoordinator(root, (url) =>
+      url === '/principal/claim' ? claimAnswer : { status: 200, body: { ok: true } }
+    );
+    try {
+      const run = await runClient(['post-edit', '--root', root], postEditPayload(root), root);
+      assert.equal(run.status, 0);
+      const hook = seen.find((r) => r.url === '/hooks/post-edit');
+      const { principal } = filesFor(root, SID);
+      if (bound) {
+        assert.equal(hook?.principal, MINTED, `${label}: presented`);
+        assert.equal(readFileSync(principal, 'utf8').trim(), MINTED, `${label}: stored`);
+        assert.equal(run.stderr, '', `${label}: nothing to report`);
+      } else {
+        assert.equal(hook?.principal, undefined, `${label}: no header`);
+        assert.ok(!existsSync(principal), `${label}: nothing stored`);
+        assert.match(run.stderr, /caller principal refused: .*NOT re-minting/, label);
+      }
+    } finally {
+      await close(server);
+      rmSync(root, { recursive: true, force: true });
+    }
   }
 });
 
@@ -595,6 +645,27 @@ test('an EMPTY mint-nonce file a crashed writer left behind is never overwritten
   });
 });
 
+test('a YOUNG empty mint-nonce file (another hook may still be writing it) is reported WITHOUT the removal step; the hook proceeds without a principal', async () => {
+  const coordinator = pythonLikeCoordinator();
+  await withCoordinator(coordinator.answer, async (root, seen) => {
+    const { nonce, principal } = filesFor(root, SID);
+    writeFileSync(nonce, '', { mode: 0o600 }); // created just now: well inside the grace
+    const run = await runClient(['post-edit', '--root', root], postEditPayload(root), root);
+    assert.deepEqual(JSON.parse(run.stdout), hookOk('/hooks/post-edit').body);
+    assert.deepEqual(trail(seen), [['/hooks/post-edit', undefined]], 'nothing claimed');
+    assert.equal(statSync(nonce).size, 0, 'the nonce file is never overwritten');
+    assert.ok(!existsSync(principal));
+    assert.ok(run.stderr.includes(nonce), 'the report names the file in full');
+    assert.match(run.stderr, /its write was still in progress/);
+    assert.match(run.stderr, /a later one adopts the nonce if that write lands/);
+    assert.doesNotMatch(
+      run.stderr,
+      /remove .* by hand/,
+      'a file a live hook may still be writing is never named for removal'
+    );
+  });
+});
+
 // R5: nothing prints a principal or a nonce — not on a refusal, not on a
 // recovery, not in a thrown message. Each coordinator below ECHOES every value
 // it was sent into its error prose and reason fields, so a client that relays
@@ -668,6 +739,216 @@ for (const [label, answer, reportsFailure] of R5_SCENARIOS) {
     });
   });
 }
+
+// ------------------------- only known reason tokens ever reach a report
+
+/** FROZEN duplicate of the Python claim route's degrade-envelope reason. */
+const CLAIM_UNCONFIRMED = 'claim_unconfirmed';
+/** FROZEN duplicate of what a report calls any other reason: absent, unknown, or not a string. */
+const UNRECOGNISED = 'unrecognised';
+/** Marks every coordinator-supplied free-text field below: a report carrying it relayed coordinator text. */
+const ECHO_MARK = 'COORDINATOR-TEXT';
+
+const echoText = (body: Record<string, unknown>, principal: string | undefined): string =>
+  `${ECHO_MARK} principal=${principal ?? '-'} nonce=${String(body.mint_nonce ?? '-')}`;
+
+/** An answer whose every free-text field echoes `text`: `error`, `detail`, `message`, the reason phrase and a header. */
+function echoing(status: number, fields: Record<string, unknown>, text: string): Answer {
+  return {
+    status,
+    body: { error: text, detail: text, message: text, ...fields },
+    phrase: text,
+    headers: { 'X-Coordinator-Detail': text },
+  };
+}
+
+/** `reason` values that are not strings, each carrying the echoed text somewhere inside where it can. */
+const NON_STRING_REASONS: Array<[string, (text: string) => unknown]> = [
+  ['an object', (text) => ({ reason: FOREIGN, text })],
+  ['an array', (text) => [FOREIGN, text]],
+  ['a number', () => 400],
+  ['null', () => null],
+  ['a boolean', () => true],
+];
+
+/** No value the client holds, and no coordinator text, is in `out`. */
+function assertNothingRelayed(out: string, where: string): void {
+  for (const value of [NONCE, STALE, FRESH, ECHO_MARK]) {
+    assert.ok(
+      !out.includes(value),
+      `${where} carries ${value.slice(0, 16)}: ${JSON.stringify(out)}`
+    );
+  }
+}
+
+test('classifying a refusal never throws on a reason that is not a string, and none of them is a refusal', () => {
+  for (const [label, make] of NON_STRING_REASONS) {
+    assert.equal(
+      principalRefusalReason({ status: 400, body: { error: 'x', reason: make('x') } }),
+      null,
+      `a reason that is ${label}`
+    );
+  }
+  assert.equal(principalRefusalReason({ status: 400, body: null }), null, 'no body');
+  assert.equal(principalRefusalReason({ status: 400, body: { reason: FOREIGN } }), FOREIGN);
+});
+
+for (const [label, make] of [
+  ...NON_STRING_REASONS,
+  ['an unknown string', (text: string) => text],
+] as Array<[string, (text: string) => unknown]>) {
+  test(`a hook's 400 whose reason is ${label} is not a principal refusal: nothing claimed or retried, nothing reported`, async () => {
+    const answer: Answerer = (url, body, principal) =>
+      url === '/principal/claim'
+        ? { status: 200, body: { ok: true, principal: FRESH } }
+        : echoing(400, { reason: make(echoText(body, principal)) }, echoText(body, principal));
+    await withCoordinator(answer, async (root, seen) => {
+      writeStored(root, { nonce: NONCE, principal: STALE });
+      const run = await runClient(['post-edit', '--root', root], postEditPayload(root), root);
+      assert.equal(run.status, 0);
+      assert.equal(run.stdout.trim(), '{}');
+      assert.deepEqual(trail(seen), [['/hooks/post-edit', STALE]], 'no claim, no retry');
+      assert.equal(run.stderr, '');
+    });
+  });
+}
+
+/** First-claim answers that confirm nothing, each echoing coordinator text in every free-text field. */
+const UNCONFIRMED_FIRST_CLAIMS: Array<[string, (text: string) => Answer]> = [
+  ['a reason that is an unknown string', (text) => echoing(200, { ok: false, reason: text }, text)],
+  ...NON_STRING_REASONS.map(([label, make]): [string, (text: string) => Answer] => [
+    `a reason that is ${label}`,
+    (text) => echoing(200, { ok: false, reason: make(text) }, text),
+  ]),
+  ['HTTP 503', (text) => echoing(503, { reason: text }, text)],
+  [
+    'a principal that is not a string',
+    (text) => echoing(200, { ok: true, principal: { text } }, text),
+  ],
+  ['a body that is not JSON', (text) => ({ status: 200, body: null, raw: text, phrase: text })],
+];
+
+for (const [label, claimAnswer] of UNCONFIRMED_FIRST_CLAIMS) {
+  test(`first claim unconfirmed (${label}): the hook is still sent, without a header, and nothing of the answer is relayed`, async () => {
+    const answer: Answerer = (url, body, principal) =>
+      url === '/principal/claim' ? claimAnswer(echoText(body, principal)) : hookOk(url);
+    await withCoordinator(answer, async (root, seen) => {
+      const run = await runClient(['post-edit', '--root', root], postEditPayload(root), root);
+      assert.equal(run.status, 0);
+      assert.deepEqual(JSON.parse(run.stdout), { ok: true }, 'the hook request was not dropped');
+      assert.deepEqual(trail(seen), [
+        ['/principal/claim', undefined],
+        ['/hooks/post-edit', undefined],
+      ]);
+      const { nonce, principal } = filesFor(root, SID);
+      assert.ok(!existsSync(principal), 'nothing stored from an unconfirmed claim');
+      assert.equal(seen[0]!.body.mint_nonce, readFileSync(nonce, 'utf8').trim(), 'nonce kept');
+      assertNothingRelayed(run.stderr, 'stderr');
+      assertNothingRelayed(run.stdout, 'stdout');
+    });
+  });
+}
+
+/**
+ * Re-claim answers that confirm nothing, and the one fragment the report
+ * names for each: the HTTP status and a KNOWN reason token, or
+ * `unrecognised`, never the coordinator's own text.
+ */
+const UNCONFIRMED_RECLAIMS: Array<[string, (text: string) => Answer, string]> = [
+  [
+    'the degrade envelope',
+    (text) => echoing(200, { ok: false, degraded: true, reason: CLAIM_UNCONFIRMED }, text),
+    `(HTTP 200, reason=${CLAIM_UNCONFIRMED})`,
+  ],
+  [
+    'a reason that is an unknown string',
+    (text) => echoing(200, { ok: false, reason: text }, text),
+    `(HTTP 200, reason=${UNRECOGNISED})`,
+  ],
+  ...NON_STRING_REASONS.map(([label, make]): [string, (text: string) => Answer, string] => [
+    `a reason that is ${label}`,
+    (text) => echoing(200, { ok: false, reason: make(text) }, text),
+    `(HTTP 200, reason=${UNRECOGNISED})`,
+  ]),
+  [
+    'HTTP 503 with an unknown reason',
+    (text) => echoing(503, { reason: text }, text),
+    `(HTTP 503, reason=${UNRECOGNISED})`,
+  ],
+  [
+    'HTTP 500 with no reason',
+    (text) => echoing(500, {}, text),
+    `(HTTP 500, reason=${UNRECOGNISED})`,
+  ],
+  [
+    // Only a 200 carries the claim contract's refusal, as for the Python client.
+    'HTTP 409 carrying caller_principal_claimed',
+    (text) => echoing(409, { ok: false, reason: CLAIMED }, text),
+    `(HTTP 409, reason=${CLAIMED})`,
+  ],
+  [
+    'a body that is not JSON',
+    (text) => ({ status: 200, body: null, raw: text, phrase: text }),
+    `(HTTP 200, reason=${UNRECOGNISED})`,
+  ],
+];
+
+for (const [label, claimAnswer, fragment] of UNCONFIRMED_RECLAIMS) {
+  test(`re-claim unconfirmed (${label}): the report names ${fragment} and relays nothing`, async () => {
+    const answer: Answerer = (url, body, principal) =>
+      url === '/principal/claim'
+        ? claimAnswer(echoText(body, principal))
+        : echoing(400, { reason: FOREIGN }, echoText(body, principal));
+    await withCoordinator(answer, async (root, seen) => {
+      writeStored(root, { nonce: NONCE, principal: STALE });
+      const run = await runClient(['post-edit', '--root', root], postEditPayload(root), root);
+      assert.equal(run.status, 0);
+      assert.equal(run.stdout.trim(), '{}');
+      assert.deepEqual(trail(seen), [
+        ['/hooks/post-edit', STALE],
+        ['/principal/claim', undefined],
+      ]);
+      assert.ok(
+        run.stderr.includes(
+          `(${FOREIGN}); the re-claim with the stored mint nonce was not confirmed ${fragment}`
+        ),
+        `the report names the refusal and ${fragment}: ${JSON.stringify(run.stderr)}`
+      );
+      assertNothingRelayed(run.stderr, 'stderr');
+      assertNothingRelayed(run.stdout, 'stdout');
+      assert.equal(readFileSync(filesFor(root, SID).principal, 'utf8').trim(), STALE, 'kept');
+    });
+  });
+}
+
+test('the recovery names only a known reason token: a reason it is handed that is not one is reported as unrecognised, never relayed', async () => {
+  const root = makeWorkspace();
+  try {
+    const endpoint = { port: 1, bearer: SECRET }; // never reached: both exits below claim nothing
+    const freeText = `${ECHO_MARK} ${NONCE}`;
+    for (const [sessionId, exit] of [
+      [SID, 'no stored mint nonce'],
+      [`${SID}\n`, 'the session id is malformed'],
+    ] as const) {
+      for (const reason of [freeText, [FOREIGN] as unknown as string, FOREIGN]) {
+        const reports: string[] = [];
+        const context = { endpoint, root, sessionId, report: (m: string) => reports.push(m) };
+        const retry = await recoverFromPrincipalRefusal(context, STALE, reason);
+        assert.equal(retry, null, 'nothing to retry with');
+        assert.equal(reports.length, 1);
+        const named = reason === FOREIGN ? FOREIGN : UNRECOGNISED;
+        assert.ok(
+          reports[0]!.startsWith(`coordinator refused this hook's caller principal (${named}); `),
+          `names ${named}: ${JSON.stringify(reports[0])}`
+        );
+        assert.ok(reports[0]!.includes(exit), `says why: ${exit}`);
+        assertNothingRelayed(reports[0]!, 'the report');
+      }
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 // ------------------------------------------------ against THIS (Node) coordinator
 

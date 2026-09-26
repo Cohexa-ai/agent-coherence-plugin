@@ -186,12 +186,128 @@ for (const ageSeconds of [0, 1]) {
       assert.equal(run.waits, BOUNDED_WAITS, 'a write in progress is waited on');
       assert.ok(run.error?.message.includes(nonce), 'the error names the file in full');
       assert.match(run.error!.message, /not overwriting it/);
+      assert.doesNotMatch(
+        run.error!.message,
+        /remove .* by hand/,
+        'a write that may still be in progress is never named for removal'
+      );
       assert.equal(statSync(nonce).size, 0, 'left exactly as it was');
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
   });
 }
+
+// ------------------------- the grace window, pinned on both sides of its edge
+
+/**
+ * FROZEN duplicates of the Python rule (auth.TORN_FILE_GRACE_SEC = 2.0 and
+ * `age > TORN_FILE_GRACE_SEC`) — never imported from the code under test. An
+ * existing nonce file that holds no complete nonce is PAST the grace only when
+ * its age is strictly greater than 2000 ms; at exactly 2000 ms it is still
+ * young and is waited on.
+ */
+const GRACE_MS = 2000;
+/** The operator's step, which only an abandoned (old) file may name. */
+const REMOVAL_STEP = /remove .* by hand/;
+
+/** The young path's report, byte for byte (parity with the Python client's young-path message). */
+function youngMessage(path: string): string {
+  return (
+    `${path} exists but its write was still in progress across 5 attempts; not overwriting it. ` +
+    'This invocation proceeds without a principal; a later one adopts the nonce if that write ' +
+    `lands, or reports ${path} as an interrupted write once it has stayed incomplete for 2 s.`
+  );
+}
+
+/** The old path's report, byte for byte (unchanged, parity with the Python client). */
+function abandonedMessage(path: string): string {
+  return (
+    `${path} exists but holds no complete nonce (an interrupted write); not overwriting it. ` +
+    `The session runs without a principal until it is fixed: remove ${path} by hand if no ` +
+    'hook of this session is running.'
+  );
+}
+
+/**
+ * An empty nonce file whose mtime is a whole second, and a clock pinned at
+ * `ageMs` after it — so the age the client computes is exactly `ageMs`, to the
+ * millisecond. `tick` advances the pinned clock (a wait that took time).
+ */
+function withPinnedAge<T>(
+  ageMs: number,
+  body: (nonce: string, tick: (ms: number) => void) => T
+): T {
+  const root = makeWorkspace();
+  const original = Date.now;
+  try {
+    const { nonce } = filesFor(root, SID);
+    writeFileSync(nonce, '', { mode: 0o600 });
+    const wholeSecond = Math.floor(original() / 1000) - 60;
+    utimesSync(nonce, wholeSecond, wholeSecond);
+    assert.equal(
+      statSync(nonce).mtimeMs,
+      wholeSecond * 1000,
+      'precondition: the mtime is exactly the whole second set, so the pinned age is exact'
+    );
+    let now = wholeSecond * 1000 + ageMs;
+    Date.now = () => now;
+    return body(nonce, (ms) => {
+      now += ms;
+    });
+  } finally {
+    Date.now = original;
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+for (const ageMs of [GRACE_MS - 1, GRACE_MS]) {
+  test(`grace edge: a torn nonce file aged exactly ${ageMs} ms is still YOUNG — the whole bounded wait, then the young report with no removal step`, () => {
+    withPinnedAge(ageMs, (nonce) => {
+      const run = countingWaits(() =>
+        ensureMintNonce(dirname(dirname(nonce)), callerPrincipalKey(SID))
+      );
+      assert.equal(run.waits, BOUNDED_WAITS, `aged ${ageMs} ms: not past the grace, so waited on`);
+      assert.equal(run.error?.message, youngMessage(nonce), `aged ${ageMs} ms: the young report`);
+      assert.doesNotMatch(
+        run.error!.message,
+        REMOVAL_STEP,
+        'a young file is never named for removal'
+      );
+      assert.equal(statSync(nonce).size, 0, 'left exactly as it was');
+    });
+  });
+}
+
+for (const ageMs of [GRACE_MS + 1, GRACE_MS + 100]) {
+  test(`grace edge: a torn nonce file aged ${ageMs} ms is PAST the grace — reported at once with the removal step, no wait`, () => {
+    withPinnedAge(ageMs, (nonce) => {
+      const run = countingWaits(() =>
+        ensureMintNonce(dirname(dirname(nonce)), callerPrincipalKey(SID))
+      );
+      assert.equal(run.waits, 0, `aged ${ageMs} ms: past the grace, so not waited on`);
+      assert.equal(
+        run.error?.message,
+        abandonedMessage(nonce),
+        `aged ${ageMs} ms: the abandoned report`
+      );
+      assert.equal(statSync(nonce).size, 0, 'left exactly as it was');
+    });
+  });
+}
+
+test('grace edge: the age is re-read at every attempt — a young file that crosses the edge DURING the wait is reported as abandoned at that attempt', () => {
+  // 1990 ms at the first attempt; each wait advances the pinned clock 20 ms, so
+  // the second attempt sees 2010 ms (past the edge) and stops waiting.
+  withPinnedAge(GRACE_MS - 10, (nonce, tick) => {
+    const run = countingWaits(
+      () => ensureMintNonce(dirname(dirname(nonce)), callerPrincipalKey(SID)),
+      () => tick(20)
+    );
+    assert.equal(run.waits, 1, 'one wait, then the file is past the grace');
+    assert.equal(run.error?.message, abandonedMessage(nonce));
+  });
+});
 
 test("mint nonce: a YOUNG empty file whose writer lands during the wait is adopted — the loser presents the winner's nonce", () => {
   const root = makeWorkspace();

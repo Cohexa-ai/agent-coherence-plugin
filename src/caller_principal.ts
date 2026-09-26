@@ -35,9 +35,11 @@
  *   0700 `.coherence/`, at 0600. The nonce is created with O_CREAT|O_EXCL — the
  *   hook.secret discipline — and never rewritten or removed. A nonce file that
  *   exists but holds no complete nonce is waited on (bounded) only while it is
- *   young enough to be a racer's write in progress; an older one is reported at
- *   once, naming the file and the operator's step, and the session runs without
- *   a principal until it is removed by hand. The principal is written whole to
+ *   young enough to be a racer's write in progress (age <= 2000 ms), and if it
+ *   is still incomplete after the wait it is reported as a write that may still
+ *   be in progress, with no step to take; an older one is reported at once,
+ *   naming the file and the operator's step, and the session runs without a
+ *   principal until it is removed by hand. The principal is written whole to
  *   a temporary file and renamed into place, so no reader sees it torn; it is
  *   replaced only by a value the coordinator handed back for the stored nonce,
  *   never by a claim under a new one.
@@ -54,7 +56,10 @@
  *   closes.
  * - Nothing prints a principal or a nonce (R5): a report carries a typed
  *   reason, an HTTP status, a file path or a transport error, never the
- *   coordinator's prose.
+ *   coordinator's prose. A coordinator `reason` is named only when it is one of
+ *   the known tokens; any other value — another string, a value that is not a
+ *   string, or none at all — is reported as `unrecognised`, and classifying it
+ *   never throws.
  *
  * What this buys on the hook surface is convention-enforcement and a
  * detectable unbound caller: any process that can read `.coherence/` can read
@@ -92,6 +97,22 @@ const PRINCIPAL_REFUSAL_REASONS: ReadonlySet<unknown> = new Set([
   CALLER_PRINCIPAL_ABSENT_REASON,
   CALLER_PRINCIPAL_FOREIGN_REASON,
 ]);
+/** The Python claim route's watchdog degrade envelope (`{ok: false, degraded: true, reason}`). */
+export const CLAIM_UNCONFIRMED_REASON = 'claim_unconfirmed';
+/**
+ * What a report calls a coordinator `reason` that is not a known token: any
+ * other string, a value that is not a string, or no reason at all. The value is
+ * never relayed — a coordinator's fields are data, and whatever it put there
+ * (an echoed nonce or principal included) must not reach stderr (R5).
+ */
+export const UNRECOGNISED_REASON = 'unrecognised';
+/** The coordinator reasons a report may name, by exact membership. */
+const REPORTABLE_REASONS: ReadonlySet<unknown> = new Set([
+  CALLER_PRINCIPAL_ABSENT_REASON,
+  CALLER_PRINCIPAL_FOREIGN_REASON,
+  CALLER_PRINCIPAL_CLAIMED_REASON,
+  CLAIM_UNCONFIRMED_REASON,
+]);
 /** The pid-file backend that issues no principals (this package's own coordinator). */
 export const NODE_BACKEND = 'node';
 
@@ -114,15 +135,29 @@ const NONCE_RETRY_MS = 20;
 /**
  * Twin of Python auth.TORN_FILE_GRACE_SEC (2.0 s): how long an existing nonce
  * file that holds no complete nonce is treated as a racer's write still in
- * progress. A YOUNG one is waited on (the bounded wait), so a loser adopts the
- * winner's nonce; an OLDER one was left by a writer that was killed or ran out
- * of space, and is reported at once instead of charging every later hook of
- * the session the whole wait. Either way the file is never overwritten, so the
- * grace decides only whether to wait.
+ * progress. The edge is strict, as in the Python rule (`age > 2.0`): a file
+ * aged exactly 2000 ms is still young. A YOUNG one is waited on (the bounded
+ * wait), so a loser adopts the winner's nonce, and if it is still incomplete
+ * afterwards the report names no step; an OLDER one was left by a writer that
+ * was killed or ran out of space, and is reported at once, naming the
+ * operator's step, instead of charging every later hook of the session the
+ * whole wait. Either way the file is never overwritten, so the grace decides
+ * only whether to wait and whether a report may tell the operator to remove it.
  */
 export const TORN_NONCE_GRACE_MS = 2000;
 
 export type PrincipalClaimOutcome = 'bound' | 'unsupported' | 'refused' | 'unconfirmed';
+
+/**
+ * `reason` as a report may name it: a known token (REPORTABLE_REASONS), else
+ * UNRECOGNISED_REASON. Never throws and never returns coordinator text,
+ * whatever `reason` is.
+ */
+export function reportableReason(reason: unknown): string {
+  return typeof reason === 'string' && REPORTABLE_REASONS.has(reason)
+    ? reason
+    : UNRECOGNISED_REASON;
+}
 
 export interface PrincipalClaim {
   outcome: PrincipalClaimOutcome;
@@ -192,11 +227,31 @@ function nonceRemediation(path: string): string {
 }
 
 /**
+ * The report for a file still incomplete after the bounded wait but NOT past
+ * the grace — byte for byte the Python client's young-path message (parity).
+ * It names no step: a live racer's write lands moments later and becomes the
+ * nonce the session is bound under, so removing the file then would leave that
+ * binding under a nonce no hook can present again. If the write never lands,
+ * the file ages past the grace and a later hook reports it as abandoned, with
+ * the step.
+ */
+function youngNonceMessage(path: string): string {
+  return (
+    `${path} exists but its write was still in progress across ${NONCE_MAX_ATTEMPTS} ` +
+    'attempts; not overwriting it. This invocation proceeds without a principal; a later ' +
+    `one adopts the nonce if that write lands, or reports ${path} as an interrupted write ` +
+    `once it has stayed incomplete for ${TORN_NONCE_GRACE_MS / 1000} s.`
+  );
+}
+
+/**
  * The mint nonce for `key`, generating and persisting it first if no process
  * has. Throws if `.coherence/` is missing (a hook client never creates it) or
- * if an existing file never holds a complete nonce: at once, without waiting,
- * when it is older than TORN_NONCE_GRACE_MS, else after the bounded wait. The
- * file is never overwritten or removed.
+ * if an existing file never holds a complete nonce: at once, without waiting
+ * and naming the operator's step, when it is older than TORN_NONCE_GRACE_MS
+ * (its age is re-read at every attempt); else after the bounded wait, as a
+ * write that may still be in progress, with no step. The file is never
+ * overwritten or removed.
  */
 export function ensureMintNonce(root: string, key: string): string {
   const path = principalFile(root, key, '.nonce');
@@ -214,10 +269,7 @@ export function ensureMintNonce(root: string, key: string): string {
     if (attempt < NONCE_MAX_ATTEMPTS)
       Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, NONCE_RETRY_MS);
   }
-  throw new Error(
-    `${path} exists but stayed unreadable across ${NONCE_MAX_ATTEMPTS} attempts; not overwriting it. ` +
-      nonceRemediation(path)
-  );
+  throw new Error(youngNonceMessage(path));
 }
 
 export function loadCallerPrincipal(root: string, key: string): string | null {
@@ -271,19 +323,23 @@ export async function claimCallerPrincipal(
   }
   const body = answer.body;
   const principal = body?.principal;
-  if (
-    answer.status === 200 &&
-    body?.ok === true &&
-    typeof principal === 'string' &&
-    principal !== ''
-  ) {
+  // Only a 2xx body carries the claim contract — the rule the Python client
+  // applies — so a status outside it is an unconfirmed claim that names only
+  // its status and a known reason token, whatever its body says.
+  const contract = answer.status >= 200 && answer.status < 300;
+  if (contract && body?.ok === true && typeof principal === 'string' && principal !== '') {
     return { outcome: 'bound', principal, detail: '' };
   }
-  if (body?.reason === CALLER_PRINCIPAL_CLAIMED_REASON) {
+  if (contract && body?.reason === CALLER_PRINCIPAL_CLAIMED_REASON) {
     return { outcome: 'refused', principal: null, detail: CALLER_PRINCIPAL_CLAIMED_REASON };
   }
-  // The status only: the coordinator's own fields are never relayed (R5).
-  return { outcome: 'unconfirmed', principal: null, detail: `HTTP ${answer.status}` };
+  // The status and a known reason token only — an absent, unknown or non-string
+  // reason is `unrecognised` — so the coordinator's own fields are never relayed (R5).
+  return {
+    outcome: 'unconfirmed',
+    principal: null,
+    detail: `HTTP ${answer.status}, reason=${reportableReason(body?.reason)}`,
+  };
 }
 
 /**
@@ -356,8 +412,8 @@ export interface PrincipalContext {
 /**
  * After a request presenting `presented` (null: none) was refused for
  * `reason`, what to retry it with — ONCE — or null to stop, the refusal
- * reported. Re-claims with the SAME stored mint nonce, never a new one, and
- * deletes nothing (KTD11):
+ * reported (naming `reason` only if it is a known token). Re-claims with the
+ * SAME stored mint nonce, never a new one, and deletes nothing (KTD11):
  * - bound to a principal other than the one presented: it replaces the stored
  *   one and is the retry's principal (the coordinator lost the binding, or the
  *   claim that made it lost its response);
@@ -373,7 +429,7 @@ export async function recoverFromPrincipalRefusal(
   reason: string
 ): Promise<{ principal: string | null } | null> {
   const { endpoint, root, sessionId, report } = context;
-  const refused = `coordinator refused this hook's caller principal (${reason})`;
+  const refused = `coordinator refused this hook's caller principal (${reportableReason(reason)})`;
   if (!SESSION_ID_RE.test(sessionId)) {
     report(`${refused}; the session id is malformed, so nothing was re-claimed`);
     return null;
