@@ -13,12 +13,16 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   existsSync,
+  lstatSync,
+  lutimesSync,
   mkdirSync,
   mkdtempSync,
   readdirSync,
   readFileSync,
+  renameSync,
   rmSync,
   statSync,
+  symlinkSync,
   utimesSync,
   writeFileSync,
 } from 'node:fs';
@@ -31,6 +35,7 @@ import {
   callerPrincipalKey,
   ensureMintNonce,
   loadCallerPrincipal,
+  obtainStoredPrincipal,
   storeCallerPrincipal,
 } from '../caller_principal.js';
 
@@ -125,10 +130,10 @@ function listCoherence(root: string): string[] {
  * Python test counts `time.sleep` the same way). `onWait` runs at each wait —
  * the moment a racer's write could land.
  */
-function countingWaits(
-  body: () => string,
+function countingWaits<T>(
+  body: () => T,
   onWait?: (n: number) => void
-): { value?: string; error?: Error; waits: number } {
+): { value?: T; error?: Error; waits: number } {
   const original = Atomics.wait;
   let waits = 0;
   Atomics.wait = (() => {
@@ -211,7 +216,11 @@ const GRACE_MS = 2000;
 /** The operator's step, which only an abandoned (old) file may name. */
 const REMOVAL_STEP = /remove .* by hand/;
 
-/** The young path's report, byte for byte (parity with the Python client's young-path message). */
+/**
+ * The young path's report, byte for byte — a FROZEN copy of the Python client's
+ * young-path message (auth.ensure_mint_nonce: its ENSURE_SECRET_MAX_RETRIES of
+ * 5 attempts, and TORN_FILE_GRACE_SEC = 2.0 rendered with `:g` as "2").
+ */
 function youngMessage(path: string): string {
   return (
     `${path} exists but its write was still in progress across 5 attempts; not overwriting it. ` +
@@ -229,72 +238,136 @@ function abandonedMessage(path: string): string {
   );
 }
 
+/** Where the pinned clock and the torn nonce file's timestamps sit (see withPinnedAge). */
+interface PinnedAgeOptions {
+  /** The mtime's part below a whole second, in ms (default 0: a whole second). */
+  fractionMs?: number;
+  /**
+   * Seconds from the real now to the whole second the mtime is built on. The
+   * default, -60, puts the pinned clock BEHIND the real now, so a timestamp the
+   * system stamps with the real now (ctime; an atime a read refreshes) reads
+   * as the future — young. +3600 puts it AHEAD, so such a timestamp reads as an
+   * hour old — past the grace.
+   */
+  shiftSeconds?: number;
+  /** The atime's age on the pinned clock, in ms (default: the mtime's own age). */
+  atimeAgeMs?: number;
+}
+
 /**
- * An empty nonce file whose mtime is a whole second, and a clock pinned at
- * `ageMs` after it — so the age the client computes is exactly `ageMs`, to the
- * millisecond. `tick` advances the pinned clock (a wait that took time).
+ * An empty nonce file and a clock pinned at `ageMs` after its mtime — so the
+ * age the client computes is exactly `ageMs`, to the millisecond. `tick`
+ * advances the pinned clock (a wait that took time); `now` reads it.
  */
 function withPinnedAge<T>(
   ageMs: number,
-  body: (nonce: string, tick: (ms: number) => void) => T
+  body: (nonce: string, tick: (ms: number) => void, now: () => number) => T,
+  options: PinnedAgeOptions = {}
 ): T {
+  const { fractionMs = 0, shiftSeconds = -60, atimeAgeMs = ageMs } = options;
   const root = makeWorkspace();
   const original = Date.now;
   try {
     const { nonce } = filesFor(root, SID);
     writeFileSync(nonce, '', { mode: 0o600 });
-    const wholeSecond = Math.floor(original() / 1000) - 60;
-    utimesSync(nonce, wholeSecond, wholeSecond);
+    const mtimeMs = (Math.floor(original() / 1000) + shiftSeconds) * 1000 + fractionMs;
+    let now = mtimeMs + ageMs;
+    utimesSync(nonce, (now - atimeAgeMs) / 1000, mtimeMs / 1000);
     assert.equal(
       statSync(nonce).mtimeMs,
-      wholeSecond * 1000,
-      'precondition: the mtime is exactly the whole second set, so the pinned age is exact'
+      mtimeMs,
+      'precondition: the mtime is exactly the one set, so the pinned age is exact'
     );
-    let now = wholeSecond * 1000 + ageMs;
     Date.now = () => now;
-    return body(nonce, (ms) => {
-      now += ms;
-    });
+    return body(
+      nonce,
+      (ms) => {
+        now += ms;
+      },
+      () => now
+    );
   } finally {
     Date.now = original;
     rmSync(root, { recursive: true, force: true });
   }
 }
 
-for (const ageMs of [GRACE_MS - 1, GRACE_MS]) {
-  test(`grace edge: a torn nonce file aged exactly ${ageMs} ms is still YOUNG — the whole bounded wait, then the young report with no removal step`, () => {
-    withPinnedAge(ageMs, (nonce) => {
-      const run = countingWaits(() =>
-        ensureMintNonce(dirname(dirname(nonce)), callerPrincipalKey(SID))
-      );
-      assert.equal(run.waits, BOUNDED_WAITS, `aged ${ageMs} ms: not past the grace, so waited on`);
-      assert.equal(run.error?.message, youngMessage(nonce), `aged ${ageMs} ms: the young report`);
-      assert.doesNotMatch(
-        run.error!.message,
-        REMOVAL_STEP,
-        'a young file is never named for removal'
-      );
-      assert.equal(statSync(nonce).size, 0, 'left exactly as it was');
-    });
-  });
+/**
+ * Each edge age below runs twice: against an mtime on a whole second, and
+ * against one 750 ms past it. The Python rule reads `st_mtime` at full precision, so
+ * an age computed from the mtime cut to whole seconds is 750 ms too old there
+ * (and one rounded up, 250 ms too young), which puts it on the other side of
+ * the edge.
+ */
+const MTIME_FRACTIONS_MS = [0, 750] as const;
+
+function atFraction(fractionMs: number): string {
+  return fractionMs === 0 ? '' : ` (its mtime ${fractionMs} ms past a whole second)`;
 }
 
-for (const ageMs of [GRACE_MS + 1, GRACE_MS + 100]) {
-  test(`grace edge: a torn nonce file aged ${ageMs} ms is PAST the grace — reported at once with the removal step, no wait`, () => {
-    withPinnedAge(ageMs, (nonce) => {
-      const run = countingWaits(() =>
-        ensureMintNonce(dirname(dirname(nonce)), callerPrincipalKey(SID))
+for (const fractionMs of MTIME_FRACTIONS_MS) {
+  for (const ageMs of [GRACE_MS - 1, GRACE_MS]) {
+    test(`grace edge: a torn nonce file aged exactly ${ageMs} ms is still YOUNG — the whole bounded wait, then the young report with no removal step${atFraction(fractionMs)}`, () => {
+      withPinnedAge(
+        ageMs,
+        (nonce) => {
+          const run = countingWaits(() =>
+            ensureMintNonce(dirname(dirname(nonce)), callerPrincipalKey(SID))
+          );
+          assert.equal(
+            run.waits,
+            BOUNDED_WAITS,
+            `aged ${ageMs} ms: not past the grace, so waited on`
+          );
+          assert.equal(
+            run.error?.message,
+            youngMessage(nonce),
+            `aged ${ageMs} ms: the young report`
+          );
+          assert.doesNotMatch(
+            run.error!.message,
+            REMOVAL_STEP,
+            'a young file is never named for removal'
+          );
+          assert.equal(statSync(nonce).size, 0, 'left exactly as it was');
+        },
+        { fractionMs }
       );
-      assert.equal(run.waits, 0, `aged ${ageMs} ms: past the grace, so not waited on`);
-      assert.equal(
-        run.error?.message,
-        abandonedMessage(nonce),
-        `aged ${ageMs} ms: the abandoned report`
-      );
-      assert.equal(statSync(nonce).size, 0, 'left exactly as it was');
     });
-  });
+  }
+
+  for (const ageMs of [GRACE_MS + 1, GRACE_MS + 100]) {
+    test(`grace edge: a torn nonce file aged ${ageMs} ms is PAST the grace — reported at once with the removal step, no wait${atFraction(fractionMs)}`, () => {
+      withPinnedAge(
+        ageMs,
+        (nonce) => {
+          const run = countingWaits(() =>
+            ensureMintNonce(dirname(dirname(nonce)), callerPrincipalKey(SID))
+          );
+          assert.equal(run.waits, 0, `aged ${ageMs} ms: past the grace, so not waited on`);
+          assert.equal(
+            run.error?.message,
+            abandonedMessage(nonce),
+            `aged ${ageMs} ms: the abandoned report`
+          );
+          assert.equal(statSync(nonce).size, 0, 'left exactly as it was');
+        },
+        { fractionMs }
+      );
+    });
+  }
 }
+
+test('grace edge: a torn nonce file whose mtime reads 10 minutes in the FUTURE (a clock stepped back) is not past the grace, as in the Python rule — the whole bounded wait, then the young report', () => {
+  withPinnedAge(-600_000, (nonce) => {
+    const run = countingWaits(() =>
+      ensureMintNonce(dirname(dirname(nonce)), callerPrincipalKey(SID))
+    );
+    assert.equal(run.waits, BOUNDED_WAITS, 'a negative age is not past the grace, so waited on');
+    assert.equal(run.error?.message, youngMessage(nonce));
+    assert.equal(statSync(nonce).size, 0, 'left exactly as it was');
+  });
+});
 
 test('grace edge: the age is re-read at every attempt — a young file that crosses the edge DURING the wait is reported as abandoned at that attempt', () => {
   // 1990 ms at the first attempt; each wait advances the pinned clock 20 ms, so
@@ -308,6 +381,163 @@ test('grace edge: the age is re-read at every attempt — a young file that cros
     assert.equal(run.error?.message, abandonedMessage(nonce));
   });
 });
+
+// ------------------------------ which timestamp the grace reads: the mtime
+
+/**
+ * The Python rule is `time.time() - path.stat().st_mtime`: the wall clock
+ * against the MODIFICATION time of the file the path names, through a symlink.
+ * Each case puts the file's other timestamps on the other side of the edge from
+ * that mtime, so a client reading any of them reaches the other verdict, and
+ * asserts before and after the run that they are there. A read may refresh
+ * atime to the real now, and ctime is always the real now, so each case's
+ * frame (PinnedAgeOptions.shiftSeconds) puts the real now on that side too.
+ */
+type OtherStamp = 'atime' | 'ctime' | 'birthtime';
+
+function assertOtherStamps(
+  nonce: string,
+  now: number,
+  expected: { past: boolean; stamps: readonly OtherStamp[] }
+): void {
+  const stat = statSync(nonce);
+  const ms: Record<OtherStamp, number> = {
+    atime: stat.atimeMs,
+    ctime: stat.ctimeMs,
+    birthtime: stat.birthtimeMs,
+  };
+  for (const stamp of expected.stamps) {
+    assert.equal(
+      now - ms[stamp] > GRACE_MS,
+      expected.past,
+      `the ${stamp} reads ${expected.past ? 'past the grace' : 'young'}, so a client reading it would reach the other verdict`
+    );
+  }
+}
+
+test('grace source: the MODIFICATION time is read — an mtime past the grace is reported at once although the atime and ctime read young', () => {
+  // Not the birthtime: setting an mtime earlier than it lowers it to that
+  // mtime on macOS, so it cannot read young here. The next case covers it.
+  const young = { past: false, stamps: ['atime', 'ctime'] } as const;
+  withPinnedAge(
+    GRACE_MS + 1000,
+    (nonce, _tick, now) => {
+      assertOtherStamps(nonce, now(), young);
+      const run = countingWaits(() =>
+        ensureMintNonce(dirname(dirname(nonce)), callerPrincipalKey(SID))
+      );
+      assertOtherStamps(nonce, now(), young);
+      assert.equal(run.waits, 0, 'the mtime is past the grace, so not waited on');
+      assert.equal(run.error?.message, abandonedMessage(nonce));
+    },
+    { atimeAgeMs: 0 }
+  );
+});
+
+test('grace source: the MODIFICATION time is read — a young mtime is waited on although the atime, ctime and birthtime read past the grace', () => {
+  const past = { past: true, stamps: ['atime', 'ctime', 'birthtime'] } as const;
+  withPinnedAge(
+    1000,
+    (nonce, _tick, now) => {
+      assertOtherStamps(nonce, now(), past);
+      const run = countingWaits(() =>
+        ensureMintNonce(dirname(dirname(nonce)), callerPrincipalKey(SID))
+      );
+      assertOtherStamps(nonce, now(), past);
+      assert.equal(run.waits, BOUNDED_WAITS, 'the mtime is young, so waited on');
+      assert.equal(run.error?.message, youngMessage(nonce));
+    },
+    { shiftSeconds: 3600, atimeAgeMs: 10_000 }
+  );
+});
+
+/** Make `nonce` a symlink to `target` whose own timestamps read 10 s old on the pinned clock. */
+function linkAgedTenSeconds(nonce: string, target: string, now: number): void {
+  symlinkSync(target, nonce);
+  const tenSecondsAgo = (now - 10_000) / 1000;
+  lutimesSync(nonce, tenSecondsAgo, tenSecondsAgo);
+  assert.ok(
+    now - lstatSync(nonce).mtimeMs > GRACE_MS,
+    'precondition: the link itself reads past the grace'
+  );
+}
+
+test('grace source: a symlinked nonce file is aged by the file it names (the Python rule stats through the link) — a young one is waited on although the link itself is old', () => {
+  withPinnedAge(
+    1000,
+    (nonce, _tick, now) => {
+      const target = `${nonce}.target`;
+      renameSync(nonce, target);
+      linkAgedTenSeconds(nonce, target, now());
+      const run = countingWaits(() =>
+        ensureMintNonce(dirname(dirname(nonce)), callerPrincipalKey(SID))
+      );
+      assert.equal(run.waits, BOUNDED_WAITS, 'the named file is young, so waited on');
+      assert.equal(run.error?.message, youngMessage(nonce));
+      assert.ok(lstatSync(nonce).isSymbolicLink(), 'the link is left as it was');
+      assert.equal(statSync(target).size, 0, 'the named file is left as it was');
+    },
+    { shiftSeconds: 3600 }
+  );
+});
+
+test('grace source: a nonce path whose age cannot be read (a dangling symlink) is not past the grace, as in the Python rule (waiting is the safe default) — the whole bounded wait, then the young report', () => {
+  withPinnedAge(
+    1000,
+    (nonce, _tick, now) => {
+      const missing = `${nonce}.missing`;
+      rmSync(nonce);
+      linkAgedTenSeconds(nonce, missing, now());
+      assert.throws(() => statSync(nonce), { code: 'ENOENT' }, 'precondition: no age to read');
+      const run = countingWaits(() =>
+        ensureMintNonce(dirname(dirname(nonce)), callerPrincipalKey(SID))
+      );
+      assert.equal(run.waits, BOUNDED_WAITS, 'an unreadable age is not past the grace');
+      assert.equal(run.error?.message, youngMessage(nonce));
+      assert.ok(!existsSync(missing), 'nothing is written through the link');
+    },
+    { shiftSeconds: 3600 }
+  );
+});
+
+// ------------------------------- the report the hook prints, byte for byte
+
+/**
+ * FROZEN copy of the Python client's report when no mint nonce is usable
+ * (`_coherence_client.obtain_stored_principal`:
+ * `f"caller principal unavailable: no usable mint nonce ({exc})"`).
+ */
+function unavailableReport(message: string): string {
+  return `caller principal unavailable: no usable mint nonce (${message})`;
+}
+
+for (const [label, ageSeconds, message] of [
+  ['a YOUNG', 0, youngMessage],
+  ['an OLD', 60, abandonedMessage],
+] as const) {
+  test(`reported: ${label} torn nonce file reaches the hook's report exactly as the Python client words it; no principal is presented and nothing is written`, async () => {
+    const root = makeWorkspace();
+    try {
+      const { nonce, principal } = filesFor(root, SID);
+      writeFileSync(nonce, '', { mode: 0o600 });
+      ageBy(nonce, ageSeconds);
+      const before = listCoherence(root);
+      const reports: string[] = [];
+      const run = countingWaits(() =>
+        obtainStoredPrincipal({ port: 9, bearer: SECRET }, root, SID, (line) => {
+          reports.push(line);
+        })
+      );
+      assert.equal(await run.value, null, 'no principal is presented');
+      assert.deepEqual(reports, [unavailableReport(message(nonce))]);
+      assert.equal(statSync(nonce).size, 0, 'the nonce file is left as it was');
+      assert.ok(!existsSync(principal));
+      assert.deepEqual(listCoherence(root), before, 'nothing created beside it');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+}
 
 test("mint nonce: a YOUNG empty file whose writer lands during the wait is adopted — the loser presents the winner's nonce", () => {
   const root = makeWorkspace();
