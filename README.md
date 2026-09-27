@@ -27,9 +27,11 @@ Watches tracked artifacts (CLAUDE.md, AGENTS.md, `DECISIONS.md`, `docs/specs/`, 
 
 Verified against `claude` v2.1.131 (2026-05-17 via internal Phase E.0 probe). The `claude agents` subcommand on v2.1.131 is a management UI, not a session spawner — out of coverage scope.
 
-When one session is about to act on an artifact another session has updated, the plugin injects a warning into the agent's own context via `additionalContext`. The agent sees:
+When one session is about to act on an artifact another session has updated, the plugin injects a warning into the agent's own context via `additionalContext`. The warning's stale-read line looks like this:
 
-> ⚠ Stale read: `docs/plans/feature-x.md` was updated by session `90b1dfd3` at `2026-05-23T13:42:18Z`. Current version is v3; you previously saw v1. Consider re-reading `docs/plans/feature-x.md` before acting on stale assumptions.
+> ⚠ Stale read [warning emitted `2026-05-23T13:42:19.114000+00:00`]: `docs/plans/feature-x.md` was updated by agent `90b1dfd3` at `2026-05-23T13:42:18.402000+00:00`. Current version is v2; you previously saw v1. … Consider re-reading `docs/plans/feature-x.md` before acting on stale assumptions.
+
+On the Python backend with `agent-coherence` 0.14.1 or earlier, the line reads `was updated by session` instead of `was updated by agent`.
 
 When Claude Code **compacts** a session (auto-compaction or manual `/compact`), the model's summary can silently drop what the session held and what peers changed around the boundary. The plugin re-grounds the compacted session: a second `SessionStart` hook fires on `source=compact` and the coordinator emits a bounded payload — the grants the session held at compaction (event-anchored: "At compaction you held EXCLUSIVE on `plan.md` (v7) — re-acquire before writing.") and, for every artifact the session touched, the current coordinated version with a stale flag when a peer advanced it past the session's last-observed version. The payload reaches the model at the next user message (and on `--resume`); a live autonomous tool loop additionally receives it on its next tool admit. Delivery is at-most-once per path — one benign duplicate can occur (the mid-loop delivery followed by the next user turn's render), and the payload's closing line ("a more recent read supersedes this notice") makes a second sighting harmless. Sessions with no coordination state get nothing.
 
@@ -55,8 +57,8 @@ claude
 > Now implement the first step you summarized earlier.
 
 # Agent A receives a stale-read warning in its own context:
-#   ⚠ Stale read: docs/plans/feature-x.md was updated by session <B-short> at <ts>.
-#   Re-read docs/plans/feature-x.md before acting on stale assumptions.
+#   ⚠ Stale read [warning emitted <ts>]: docs/plans/feature-x.md was updated by <B> at <ts>. …
+#   Consider re-reading docs/plans/feature-x.md before acting on stale assumptions.
 # Agent A re-reads the file first, sees the new v2 step, and revises its plan.
 ```
 
@@ -131,7 +133,7 @@ command -v agent-coherence-hook-client
 mkdir -p .coherence && printf 'node\n' > .coherence/coordinator_backend
 ```
 
-See [§ Coordinator backends](#architecture) for the selection rules and the one remaining Python-only helper (`agent-coherence-migrate-deny`). Both backends speak the same **hook** wire contract — the decision envelope every hook returns is pinned byte-for-byte against Python by the library's `protocol_corpus` fixtures. The diagnostic endpoints (`GET /status`, `GET /health`) and preemption-notice prose are **not** converged; see [§ Known limitations](#known-limitations).
+See [§ Coordinator backends](#architecture) for the selection rules and the one remaining Python-only helper (`agent-coherence-migrate-deny`). Both backends speak the same **hook** wire contract — the decision envelope every hook returns is pinned byte-for-byte against Python by the library's `protocol_corpus` fixtures (against `agent-coherence` releases after 0.14.1; see the Library compatibility note below). The diagnostic endpoints (`GET /status`, `GET /health`) and preemption-notice prose are **not** converged; see [§ Known limitations](#known-limitations).
 
 After install, restart any running `claude` sessions in your workspace so the new `SessionStart` hook fires.
 
@@ -142,7 +144,10 @@ After install, restart any running `claude` sessions in your workspace so the ne
 > default) works against `>=0.8.0`. Compaction-aware re-grounding on the
 > Python backend requires `agent-coherence>=0.14.0` — on an older library the
 > `SessionStart` hook fails open and the feature is simply absent (every other
-> behavior is unchanged). The bundled Node backend ships it natively. Release page:
+> behavior is unchanged). The bundled Node backend ships it natively. The Python
+> backend's stale-read line and strict-mode deny text match the Node backend's only
+> from `agent-coherence>0.14.1`; 0.14.1 and earlier word them differently, for
+> example naming the writer by session rather than by agent id. Release page:
 > [Cohexa-ai/agent-coherence](https://github.com/Cohexa-ai/agent-coherence/releases).
 
 ### Other targets (Cursor, Codex, Copilot, etc.)
@@ -182,14 +187,14 @@ For tool-class restrictions (`grep` → `rg`, no `python -c`, no `sudo`), the st
 agent-coherence-migrate-deny --workspace . | jq
 ```
 
-**Strict mode works on both coordinator backends.** The Node coordinator now enforces strict-mode denies at byte-parity with Python (guarded by the `protocol_corpus` strict-mode fixtures), so a Node-backend workspace honors `.coherence/strict_mode.yaml` the same way. Select the backend per §[Coordinator backends](#architecture) below.
+**Strict mode works on both coordinator backends.** The Node coordinator now enforces strict-mode denies at byte-parity with Python (guarded by the `protocol_corpus` strict-mode fixtures; against `agent-coherence` releases after 0.14.1, see the Library compatibility note above), so a Node-backend workspace honors `.coherence/strict_mode.yaml` the same way. Select the backend per §[Coordinator backends](#architecture) below.
 
 ## Subagents and composite identity
 
 A Claude Code subagent (spawned via the Task tool) runs under its **parent's** `session_id`, so without extra handling every subagent and the parent would collapse into one coordinator identity — sibling subagents editing the same artifact would never see each other, and a subagent's write would be mis-attributed to the parent. The coordinator folds the subagent's hook-payload `agent_id` into a **composite `(session_id, agent_id)` identity** so each subagent is a first-class coherence peer:
 
 - **Sibling collision** — two subagents of the same parent editing the same tracked artifact now collide (previously a silent lost update).
-- **Attribution** — a subagent's commit is credited to the subagent in a peer's stale-read warning; `/status` shows the subagent as `claude-session-<sid>:subagent-<aid>`, keeping the parent linkage visible.
+- **Attribution** — a subagent's commit is credited to the subagent in a peer's stale-read warning. Only the Python backend's `/status` shows the subagent as `claude-session-<sid>:subagent-<aid>`, keeping the parent linkage visible: at the operator tier (`?detail=full` with the `Coherence-Local-Operator: true` header), and with `agent-coherence` 0.13.0 through 0.14.1 at the default tier too (earlier releases have no subagent identity). The Node backend's `/status` reports every session's `agent_name` as `null`.
 - **Scoped release** — the `SubagentStop` hook releases *only* that subagent's uncommitted grants (never the parent's). A stop payload with an absent `agent_id` is a normal parent stop; a present-but-malformed one is refused (no-op), never a parent-scoped release.
 
 This is **additive and fail-open**: if a hook payload carries no `agent_id`, the identity resolves to the parent exactly as before — nothing regresses for main-thread or single-session work. It is enforced identically on both coordinator backends.
@@ -226,7 +231,7 @@ Two processes:
 Two coordinator backends:
 
 - **Python** — canonical, richest feature set. Ships in the `agent-coherence` library on PyPI.
-- **Node** — self-sufficient (needs **no Python**): all six hooks, the track/untrack/status CLIs, and strict mode. The six hooks' decision envelopes are at wire-parity with Python and pinned by the `protocol_corpus` fixtures; the `status` CLI reads `GET /status`, whose envelope is **not** converged between the backends, and is not corpus-pinned. Ships as `src/` in this plugin and is built into the plugin data dir at first-session provisioning (a built dev checkout's `dist/` is used as-is).
+- **Node** — self-sufficient (needs **no Python**): all six hooks, the track/untrack/status CLIs, and strict mode. The six hooks' decision envelopes are at wire-parity with Python (`agent-coherence` releases after 0.14.1) and pinned by the `protocol_corpus` fixtures; the `status` CLI reads `GET /status`, whose envelope is **not** converged between the backends, and is not corpus-pinned. Ships as `src/` in this plugin and is built into the plugin data dir at first-session provisioning (a built dev checkout's `dist/` is used as-is).
 
 **Selecting the backend.** The default is **`node` for a fresh workspace** and **`python` for an established one** — resolved at `SessionStart` as: `COHERENCE_COORDINATOR_BACKEND` env → `<repo>/.coherence/coordinator_backend` file → guarded default. The default is guarded two ways, and both apply **only** when you haven't chosen explicitly:
 

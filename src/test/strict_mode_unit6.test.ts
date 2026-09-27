@@ -848,3 +848,188 @@ test("allowed pre-bash raises no false post-compaction stale flag", async () => 
     await cleanup();
   }
 });
+
+// ------------------------------------------- the retry a deny invites is a read
+
+/**
+ * The flip side of the section above. A strict Bash / Grep deny re-grants
+ * SHARED without recording an observation, to let the retry go through --
+ * strict mode never re-grants on a denied Read, so running the command again
+ * is how a strict session recovers. That retry, and any Read the session takes
+ * instead, finds the grant held and answers fresh; the command then runs and
+ * reads the current bytes, so the read is recorded there. Only a SHARED holder
+ * is credited, and only when the command runs. A Grep credits no held file: its
+ * path set is every tracked file under its root, not what it showed. The
+ * Python twins live in tests/integration/test_strict_mode.py.
+ */
+
+test("the bash retry a deny invites advances the baseline", async () => {
+  const { registry, sessions, post, cleanup } = await makeStrictServer([STRICT_PATH]);
+  try {
+    const ids = staleForA(registry, sessions, STRICT_PATH);
+    const denied = await post("/hooks/pre-bash", { session_id: SID_A, command: `cat ${STRICT_PATH}` });
+    assert.equal(decision(denied), "deny");
+    assert.equal(registry.lastObservedVersionFor(ids.id, ids.agentA), 1);
+
+    const retry = await post("/hooks/pre-bash", { session_id: SID_A, command: `cat ${STRICT_PATH}` });
+    assert.equal(retry.status, "fresh");
+    assert.notEqual(decision(retry), "deny");
+    assert.equal(registry.lastObservedVersionFor(ids.id, ids.agentA), 2);
+    assert.equal(registry.getAgentState(ids.id, ids.agentA), MESIState.SHARED);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("a bash retry then a grant handover reports no write", async () => {
+  const { registry, sessions, post, cleanup } = await makeStrictServer([STRICT_PATH]);
+  try {
+    const ids = staleForA(registry, sessions, STRICT_PATH);
+    await post("/hooks/pre-bash", { session_id: SID_A, command: `cat ${STRICT_PATH}` });
+    await post("/hooks/pre-bash", { session_id: SID_A, command: `cat ${STRICT_PATH}` });
+    handOverWithoutCommit(registry, ids);
+
+    const r = await post("/hooks/pre-read", { session_id: SID_A, path: STRICT_PATH });
+    assert.equal(decision(r), "deny");
+    const reason = (r.hookSpecificOutput as Record<string, string>).permissionDecisionReason;
+    assert.doesNotMatch(reason, /was updated by/);
+    assert.match(reason, /your grant on plan\.md was revoked and no new version was committed/);
+    assert.match(reason, /plan\.md is still at v2/);
+    const summary = r.summary as Record<string, unknown>;
+    assert.equal(summary.current_version, 2);
+    assert.equal(summary.prior_version_seen_by_session, 2);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("a first-touch bash retry keeps the post-compaction stale flag", async () => {
+  // A's first contact with plan.md is a denied cat, which records nothing, so
+  // the retry is A's only read of v1. Unrecorded, the re-grounding after B's
+  // commit says only "is at v2".
+  const { registry, sessions, post, cleanup } = await makeStrictServer([STRICT_PATH]);
+  try {
+    const id = registry.resolveOrRegisterArtifact(STRICT_PATH, HASH_1);
+    const agentA = sessions.registerSession(SID_A);
+    const agentB = sessions.registerSession(SID_B);
+    registry.grantShared(id, agentB, 1);
+
+    const denied = await post("/hooks/pre-bash", { session_id: SID_A, command: `cat ${STRICT_PATH}` });
+    assert.equal(decision(denied), "deny");
+    assert.equal(registry.lastObservedVersionFor(id, agentA), null);
+
+    const retry = await post("/hooks/pre-bash", { session_id: SID_A, command: `cat ${STRICT_PATH}` });
+    assert.deepEqual(retry, { status: "fresh" });
+    assert.equal(registry.lastObservedVersionFor(id, agentA), 1);
+
+    registry.acquireExclusive(id, agentB, 2);
+    registry.commit(id, agentB, HASH_2, 3);
+    assert.match(await regroundText(post), /plan\.md advanced to v2 past your last-observed v1/);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("a Grep after a denied bash does not count as reading the file", async () => {
+  // The Grep lists every tracked file under the root; it never showed plan.md,
+  // so it must not stand in for the re-read the deny asked for.
+  const { registry, sessions, post, cleanup } = await makeStrictServer([STRICT_PATH]);
+  try {
+    const ids = staleForA(registry, sessions, STRICT_PATH);
+    await post("/hooks/pre-bash", { session_id: SID_A, command: `cat ${STRICT_PATH}` });
+
+    const grep = await post("/hooks/pre-grep", { session_id: SID_A, search_root: "" });
+    assert.equal(grep.status, "fresh");
+    assert.notEqual(decision(grep), "deny");
+    assert.equal(registry.lastObservedVersionFor(ids.id, ids.agentA), 1);
+
+    handOverWithoutCommit(registry, ids);
+    const r = await post("/hooks/pre-read", { session_id: SID_A, path: STRICT_PATH });
+    assert.equal(decision(r), "deny");
+    const reason = (r.hookSpecificOutput as Record<string, string>).permissionDecisionReason;
+    assert.match(reason, /plan\.md was updated by agent /);
+    assert.equal((r.summary as Record<string, unknown>).prior_version_seen_by_session, 1);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("a Grep retry leaves the baseline for the Read to record", async () => {
+  const { registry, sessions, post, cleanup } = await makeStrictServer([STRICT_PATH]);
+  try {
+    const ids = staleForA(registry, sessions, STRICT_PATH);
+    const denied = await post("/hooks/pre-grep", { session_id: SID_A, search_root: "" });
+    assert.equal(decision(denied), "deny");
+
+    const retry = await post("/hooks/pre-grep", { session_id: SID_A, search_root: "" });
+    assert.equal(retry.status, "fresh");
+    assert.notEqual(decision(retry), "deny");
+    assert.equal(registry.lastObservedVersionFor(ids.id, ids.agentA), 1);
+
+    const read = await post("/hooks/pre-read", {
+      session_id: SID_A,
+      path: STRICT_PATH,
+      content_hash: HASH_2,
+    });
+    assert.equal(read.status, "fresh");
+    assert.equal(registry.lastObservedVersionFor(ids.id, ids.agentA), 2);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("a Read after a denied bash advances the baseline", async () => {
+  const { registry, sessions, post, cleanup } = await makeStrictServer([STRICT_PATH]);
+  try {
+    const ids = staleForA(registry, sessions, STRICT_PATH);
+    await post("/hooks/pre-bash", { session_id: SID_A, command: `cat ${STRICT_PATH}` });
+
+    const r = await post("/hooks/pre-read", {
+      session_id: SID_A,
+      path: STRICT_PATH,
+      content_hash: HASH_2,
+    });
+    assert.equal(r.status, "fresh");
+    assert.notEqual(decision(r), "deny");
+    assert.equal(registry.lastObservedVersionFor(ids.id, ids.agentA), 2);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("a bash retry denied again on another path records no observation", async () => {
+  const { registry, sessions, post, cleanup } = await makeStrictServer([STRICT_PATH, SEED_PATH]);
+  try {
+    const planIds = staleForA(registry, sessions, STRICT_PATH);
+    await post("/hooks/pre-bash", { session_id: SID_A, command: `cat ${STRICT_PATH}` });
+    staleForA(registry, sessions, SEED_PATH);
+
+    const r = await post("/hooks/pre-bash", {
+      session_id: SID_A,
+      command: `cat ${STRICT_PATH} ${SEED_PATH}`,
+    });
+    assert.equal(decision(r), "deny");
+    assert.match(
+      (r.hookSpecificOutput as Record<string, string>).permissionDecisionReason,
+      /CLAUDE\.md/,
+    );
+    assert.equal(registry.lastObservedVersionFor(planIds.id, planIds.agentA), 1);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("a bash read leaves a held EXCLUSIVE grant alone", async () => {
+  const { registry, sessions, post, cleanup } = await makeStrictServer([STRICT_PATH]);
+  try {
+    const id = registry.resolveOrRegisterArtifact(STRICT_PATH, HASH_1);
+    const agentA = sessions.registerSession(SID_A);
+    registry.acquireExclusive(id, agentA, 1);
+
+    const r = await post("/hooks/pre-bash", { session_id: SID_A, command: `cat ${STRICT_PATH}` });
+    assert.deepEqual(r, { status: "fresh" });
+    assert.equal(registry.getAgentState(id, agentA), MESIState.EXCLUSIVE);
+  } finally {
+    await cleanup();
+  }
+});

@@ -96,7 +96,13 @@ export async function handlePreGrep(
     regrants.push({ artifactId: existing.id, trigger: "post_stale_grep" });
   }
 
-  applyRegrants(deps, agentId, regrants, { commandRuns: strictStaleFirst === null, nowTick: now });
+  // No held paths: a Grep over a root does not read every file under it --
+  // see applyRegrants.
+  applyRegrants(deps, agentId, regrants, {
+    commandRuns: strictStaleFirst === null,
+    nowTick: now,
+    held: [],
+  });
 
   // v0.2 KTD-Q strict short-circuit — same shape as pre-bash (Unit 6).
   if (strictStaleFirst !== null) {
