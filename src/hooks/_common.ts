@@ -273,14 +273,24 @@ export interface Regrant {
  * recording. Keyed on the COMMAND's outcome, not the trigger and not the
  * path's own strictness: a warn-only path inside a denied command was not
  * read either.
+ *
+ * `opts.held` lists the paths the session already held SHARED going in. They
+ * need no grant, but a Bash command that runs reads them too, and the retry of
+ * a denied command is exactly that run -- see `ArtifactRegistry.recordObservation`.
+ * Grep passes none: its path set is every tracked file under its root, not
+ * what it showed, so crediting a held file would advance a baseline the
+ * session was just told to re-read.
  */
 export function applyRegrants(
   deps: HookDeps,
   agentId: string,
   regrants: readonly Regrant[],
-  opts: { commandRuns: boolean; nowTick: number },
+  opts: { commandRuns: boolean; nowTick: number; held: readonly string[] },
 ): void {
   for (const { artifactId, trigger } of regrants) {
     deps.registry.grantShared(artifactId, agentId, opts.nowTick, trigger, opts.commandRuns);
+  }
+  if (opts.commandRuns) {
+    for (const artifactId of opts.held) deps.registry.recordObservation(artifactId, agentId);
   }
 }

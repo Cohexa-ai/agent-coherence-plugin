@@ -82,9 +82,10 @@ export async function handlePreBash(
   // whole command (multi-path commands re-deny with the next path's reason
   // on retry, bounded by the model's own retry loop — mirrors Python).
   let strictStaleFirst: StaleSummary | null = null;
-  // The SHARED grants this command earns, applied only once the deny decision
-  // is known — see applyRegrants.
+  // The SHARED grants this command earns, and the SHARED grants it already
+  // holds, both applied only once the deny decision is known — see applyRegrants.
   const regrants: Regrant[] = [];
+  const held: string[] = [];
   for (const path of trackedPaths) {
     const existing = deps.registry.getArtifactByName(path);
     if (existing === null) {
@@ -97,6 +98,7 @@ export async function handlePreBash(
     }
     const agentState = deps.registry.getAgentState(existing.id, agentId);
     if (agentState !== null && agentState !== MESIState.INVALID) {
+      if (agentState === MESIState.SHARED) held.push(existing.id);
       continue; // fresh on this path
     }
     staleSummaries.push({ path, current_version: existing.version });
@@ -123,7 +125,11 @@ export async function handlePreBash(
     regrants.push({ artifactId: existing.id, trigger: "post_stale_bash" });
   }
 
-  applyRegrants(deps, agentId, regrants, { commandRuns: strictStaleFirst === null, nowTick: now });
+  applyRegrants(deps, agentId, regrants, {
+    commandRuns: strictStaleFirst === null,
+    nowTick: now,
+    held,
+  });
 
   if (strictStaleFirst !== null) {
     writeJson(res, 200, {

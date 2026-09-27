@@ -797,6 +797,35 @@ export class ArtifactRegistry {
   }
 
   /**
+   * Record that an agent already holding SHARED has read the artifact's
+   * current bytes: advance its `last_observed_version` to the current version
+   * when the recorded value is NULL or below it. Nothing else moves -- not the
+   * state and not the grant tick -- and a row that is not SHARED is left
+   * alone, so an E/M grant is never touched and a revoked (INVALID) one is
+   * never restored.
+   *
+   * A denied pre-bash / pre-grep re-grants SHARED without an observation
+   * (`grantShared(..., observed=false)`), and `grantShared` is a no-op on a
+   * SHARED row. So a retried Bash command, or the Read the session takes
+   * instead, answers fresh and is its first read at this version -- recorded
+   * here, or never. One guarded UPDATE, so the check and the write are a
+   * single statement. Mirrors Python `_record_held_read`
+   * (coordinator_server.py). Returns whether the baseline advanced.
+   */
+  recordObservation(artifactId: string, agentId: string): boolean {
+    const info = this.db
+      .prepare(
+        `UPDATE agent_states
+            SET last_observed_version = (SELECT version FROM artifacts WHERE id = ?)
+          WHERE artifact_id = ? AND agent_id = ? AND state = ?
+            AND (last_observed_version IS NULL
+                 OR last_observed_version < (SELECT version FROM artifacts WHERE id = ?))`,
+      )
+      .run(artifactId, artifactId, agentId, MESIState.SHARED, artifactId);
+    return info.changes === 1;
+  }
+
+  /**
    * Return (agent_id, granted_at_tick) of the current exclusive holder for an
    * artifact, excluding `excludeAgentId`. Returns null if no M∪E holder. Used
    * by pre-edit collision detection.

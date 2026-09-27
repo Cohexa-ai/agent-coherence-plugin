@@ -169,7 +169,10 @@ export async function handlePreRead(
       }
     }
     // Reader has a valid grant (SHARED, EXCLUSIVE, or MODIFIED) on the
-    // current version. Fresh.
+    // current version. Fresh, and the read is allowed. A SHARED grant that a
+    // denied Bash / Grep command re-armed certifies no read, so this one is
+    // the read to record (mirrors Python pre-read's fresh arm).
+    if (agentState === MESIState.SHARED) deps.registry.recordObservation(artifactId, agentId);
     const notice = drainNoticeText(deps, agentId);
     if (notice !== null) {
       writeJson(res, 200, withReground(buildFreshWithNotice(notice)));
