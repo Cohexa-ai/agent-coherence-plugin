@@ -44,7 +44,7 @@ If the bug involves a stale-read warning, paste the output of:
 claude --include-hook-events --output-format stream-json "<your prompt>"
 ```
 
-…and redact any user content. Hook events are otherwise safe to share — the plugin's `additionalContext` payloads carry only path/session-id/timestamp metadata.
+…and redact any user content. Hook events are otherwise safe to share — the plugin's `additionalContext` payloads carry only coordination metadata, such as paths, versions, grant states, timestamps and agent ids (and short session ids, on the Python backend with `agent-coherence` 0.14.1 or earlier).
 
 **Environment**
 
