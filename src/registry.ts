@@ -746,8 +746,21 @@ export class ArtifactRegistry {
    * Idempotent on already-SHARED state. Transitions from MODIFIED or
    * EXCLUSIVE to SHARED are valid per MESI semantics (writer downgrades
    * to reader). Throws on a non-valid transition.
+   *
+   * `observed` (default true) says whether this grant certifies that the
+   * agent now holds the artifact's current bytes. `false` is the pre-bash /
+   * pre-grep re-grant issued alongside a DENIED command, which never ran: the
+   * recorded `last_observed_version` is left as it was — the prior value
+   * kept, a never-observed row still NULL — exactly as on a transition to
+   * INVALID. Mirrors Python `set_agent_state(..., observed=False)`.
    */
-  grantShared(artifactId: string, agentId: string, nowTick: number, _trigger = "grant_shared"): void {
+  grantShared(
+    artifactId: string,
+    agentId: string,
+    nowTick: number,
+    _trigger = "grant_shared",
+    observed = true,
+  ): void {
     if (!this.hasArtifact(artifactId)) {
       throw new Error(`grantShared: artifact ${artifactId} not registered`);
     }
@@ -763,7 +776,15 @@ export class ArtifactRegistry {
           `grantShared: ${agentId} transition ${priorState}→SHARED not allowed`,
         );
       }
-      this.setAgentStateInternal(artifactId, agentId, priorState, MESIState.SHARED, nowTick, _trigger);
+      this.setAgentStateInternal(
+        artifactId,
+        agentId,
+        priorState,
+        MESIState.SHARED,
+        nowTick,
+        _trigger,
+        observed ? undefined : null,
+      );
       this.db.exec("COMMIT");
     } catch (err) {
       try {
@@ -773,6 +794,35 @@ export class ArtifactRegistry {
       }
       throw err;
     }
+  }
+
+  /**
+   * Record that an agent already holding SHARED has read the artifact's
+   * current bytes: advance its `last_observed_version` to the current version
+   * when the recorded value is NULL or below it. Nothing else moves -- not the
+   * state and not the grant tick -- and a row that is not SHARED is left
+   * alone, so an E/M grant is never touched and a revoked (INVALID) one is
+   * never restored.
+   *
+   * A denied pre-bash / pre-grep re-grants SHARED without an observation
+   * (`grantShared(..., observed=false)`), and `grantShared` is a no-op on a
+   * SHARED row. So a retried Bash command, or the Read the session takes
+   * instead, answers fresh and is its first read at this version -- recorded
+   * here, or never. One guarded UPDATE, so the check and the write are a
+   * single statement. Mirrors Python `_record_held_read`
+   * (coordinator_server.py). Returns whether the baseline advanced.
+   */
+  recordObservation(artifactId: string, agentId: string): boolean {
+    const info = this.db
+      .prepare(
+        `UPDATE agent_states
+            SET last_observed_version = (SELECT version FROM artifacts WHERE id = ?)
+          WHERE artifact_id = ? AND agent_id = ? AND state = ?
+            AND (last_observed_version IS NULL
+                 OR last_observed_version < (SELECT version FROM artifacts WHERE id = ?))`,
+      )
+      .run(artifactId, artifactId, agentId, MESIState.SHARED, artifactId);
+    return info.changes === 1;
   }
 
   /**
@@ -856,6 +906,9 @@ export class ArtifactRegistry {
    * A transition TO INVALID preserves the prior recorded value (CASE guard
    * on the UPDATEs; NULL on the INSERT) and a never-observed row keeps NULL
    * (never a 0-sentinel). Mirrors Python sqlite_registry.set_agent_state.
+   *
+   * `observedVersion === null` is a grant that certifies no read (Python's
+   * `observed=False`): it takes the same preserving branch as INVALID.
    */
   private setAgentStateInternal(
     artifactId: string,
@@ -864,12 +917,12 @@ export class ArtifactRegistry {
     newState: MESIState,
     nowTick: number,
     _trigger: string,
-    observedVersion?: number,
+    observedVersion?: number | null,
   ): void {
     const newInMe = isWriter(newState);
     const prevInMe = isWriter(priorState);
 
-    const observe = newState !== MESIState.INVALID;
+    const observe = newState !== MESIState.INVALID && observedVersion !== null;
     let observedValue: number | null = null;
     if (observe) {
       if (observedVersion !== undefined) {

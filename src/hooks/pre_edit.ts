@@ -91,15 +91,15 @@ export async function handlePreEdit(
   if (existing !== null && deps.policy.isStrictMode(path)) {
     const editorState = deps.registry.getAgentState(artifactId, agentId);
     if (existing.version > 0 && editorState === MESIState.INVALID) {
-      const lastWriterSession =
-        existing.last_writer_id !== null
-          ? deps.sessions.agentIdToSessionId(existing.last_writer_id)
-          : null;
       const summary: StaleSummary = {
         path,
         current_version: existing.version,
-        prior_version_seen_by_session: existing.version - 1,
-        last_writer_session_id: lastWriterSession ?? "<unknown>",
+        // R8: the observed version, not the inferred one -- see pre_read.ts.
+        prior_version_seen_by_session:
+          deps.registry.lastObservedVersionFor(artifactId, agentId) ??
+          (existing.version > 0 ? existing.version - 1 : 0),
+        // R7: the registry's handle for the writer, not a recovered session id.
+        last_writer_session_id: existing.last_writer_id ?? "<unknown>",
         last_writer_at_unix_ts: existing.updated_at,
         warning_generated_at_unix_ts: nowUnix(),
         hash_differs: false, // pre-edit doesn't carry content_hash
@@ -117,7 +117,8 @@ export async function handlePreEdit(
   // Collision detection: snapshot exclusive holder BEFORE acquireExclusive
   // (the acquire silently revokes their grant).
   const holder = deps.registry.exclusiveHolder(artifactId, agentId);
-  const holderSessionId = holder !== null ? deps.sessions.agentIdToSessionId(holder.agentId) : null;
+  // R7: name the incumbent by its agent id.
+  const holderSessionId = holder !== null ? holder.agentId : null;
   const holderAcquiredAt = holder?.grantedAtTick ?? null;
 
   // Acquire EXCLUSIVE — invalidates any peers in M/E/S + writes pending

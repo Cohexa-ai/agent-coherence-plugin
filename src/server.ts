@@ -111,7 +111,9 @@ function handleHealth(req: IncomingMessage, res: ServerResponse, options: Server
  * - **Default (minimal)**: Bearer-auth only. UUID5 agent_id ONLY (strip
  *   `claude-session-` prefix so operators can't accidentally cross-reference
  *   CC transcript history); repo-relative paths; counts and aggregates.
- *   Lower-leakage tier for default operator queries.
+ *   Lower-leakage tier for default operator queries. R6: `agent_name` is the
+ *   `claude-session-<session id>` form, so it is null here — see
+ *   `handleStatus`.
  * - **`?detail=metrics`**: Bearer-auth only. KTD-J counters only; NO paths,
  *   NO session identifiers. Safe-to-share tier for GitHub bug reports.
  *   README routes users here for issue templates.
@@ -142,12 +144,15 @@ interface StatusDefaultBody {
   sessions: ReadonlyArray<{
     agent_id: string;
     /**
-     * `null` when the SessionRegistry has no name for this holder. The map is
-     * process-local while the holder set comes from durable `agent_states`, so
-     * a grant that outlived the coordinator process that issued it has no
-     * recoverable name — `agent_id` is a one-way uuid5 of the session id.
-     * Python emits `null` in the same case; a sentinel string would put "no
-     * name" into the same type and namespace as real names.
+     * `null` on every row this tier serves (R6), and structurally nullable for
+     * the reason it always was: the SessionRegistry map is process-local while
+     * the holder set comes from durable `agent_states`, so a grant that
+     * outlived the coordinator process that issued it has no recoverable name
+     * — `agent_id` is a one-way uuid5 of the session id. Python emits `null`
+     * in both cases; a sentinel string would put "no name" into the same type
+     * and namespace as real names. The field is kept rather than dropped
+     * because the wire shape is parity-pinned to Python's, where the operator
+     * tier still carries a name.
      */
     agent_name: string | null;
     states: Record<string, string>;
@@ -208,9 +213,9 @@ function handleStatus(req: IncomingMessage, res: ServerResponse, options: Server
   // agent_name field; the stored agent_id is already a bare UUID5 per KTD-K).
   //
   // AC-03 (cross-backend parity): tracked_artifacts uses `path` (not
-  // `name`) to match Python's wire shape. Sessions include agent_name +
-  // per-artifact MESI states so agent-coherence-status renders the same
-  // table against either backend.
+  // `name`) to match Python's wire shape. Sessions carry the agent_name field
+  // (null below the operator tier, per R6) + per-artifact MESI states so
+  // agent-coherence-status renders the same table against either backend.
   const artifactList = options.registry.listArtifacts();
   const artifacts = artifactList.map((a) => ({
     id: a.id,
@@ -227,16 +232,24 @@ function handleStatus(req: IncomingMessage, res: ServerResponse, options: Server
         states[art.name] = state;
       }
     }
-    // null, not a sentinel, when the SessionRegistry has not seen this
-    // agent_id — a holder that surfaced via a peer invalidation, or whose
-    // grant outlived the process that issued it. `<unknown>` is prose and
-    // belongs in permissionDecisionReason; this field is a machine-read
-    // identifier, and a string there is indistinguishable from a session
-    // actually named that.
-    const agentName = options.sessions.agentIdToName(agentId);
+    // R6: `agent_name` is `claude-session-<session id>` — rendering it here
+    // republished that session's raw identifier beside its per-artifact
+    // state. Python moved the name behind the operator (?detail=full) tier;
+    // Node has no operator tier to move it into (detail=full answers 501
+    // above), so on the one tier it serves the name is dropped outright. The
+    // row keeps `agent_id`, a uuid5 of the session id that is not reversible,
+    // which is the handle a caller attributes by.
+    //
+    // null, not a sentinel: `<unknown>` is prose and belongs in
+    // permissionDecisionReason; this field is a machine-read identifier, and
+    // a string there is indistinguishable from a session actually named that.
+    // null is also what this row already carried whenever the SessionRegistry
+    // had not seen the agent_id — a holder that surfaced via a peer
+    // invalidation, or whose grant outlived the process that issued it — so
+    // the type and the consumer path are unchanged.
     return {
       agent_id: agentId,
-      agent_name: agentName,
+      agent_name: null,
       states,
     };
   });
